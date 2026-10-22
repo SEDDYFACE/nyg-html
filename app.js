@@ -77,7 +77,7 @@
     auth: { flowType: "pkce" }
   });
   const BASE_URL = location.origin + location.pathname;
-  const MAX_CODE = 200000;
+  const MAX_CODE = 500000;
 
   let session = null;
   let profile = null;
@@ -603,6 +603,8 @@
   function postForm(project, post) {
     const editing = !!post;
     const title = h("input", { type: "text", required: true, maxlength: 80, value: post ? post.title : "" });
+    let titleAuto = false;   // タイトルがファイル名から自動入力された状態か
+    title.addEventListener("input", () => { titleAuto = false; });   // 自分で編集したら、以後は上書きしない
     const mk = (v, ph) => h("textarea", { class: "code", rows: 12, spellcheck: "false", autocapitalize: "off", placeholder: ph, value: v || "" });
     const html = mk(post && post.html, "<h1>Hello!</h1>\n<button id=\"btn\">押してね</button>");
     const css = mk(post && post.css, "h1 { color: tomato; }");
@@ -629,7 +631,7 @@
     const fileInfo = h("ul", { class: "file-list" });
     const fileBox = h("div", { class: "hidden" },
       field("ファイルを選択", fileInput,
-        ".html（.htm）・.css・.js のファイルを選べます（複数選択可、各種類1つずつ、各200KBまで）。HTMLだけでもOKです。選んだ内容は「コード入力」に切り替えて確認・修正できます。"),
+        ".html（.htm）・.css・.js のファイルを選べます（複数選択可、各種類1つずつ、各500KBまで）。HTMLだけでもOKです。選んだ内容は「コード入力」に切り替えて確認・修正できます。"),
       fileInfo);
 
     function showFileInfo(items, errors) {
@@ -660,9 +662,10 @@
         html.value = found.html || "";
         css.value = found.css || "";
         js.value = found.js || "";
-        if (!title.value.trim()) {
-          const first = files.find(f => /\.(html?|css|js)$/i.test(f.name));
-          if (first) title.value = first.name.replace(/\.[^.]+$/, "").slice(0, 80);
+        // タイトルが空、または前回ファイル名から自動で入れたままなら、選択したファイル名（HTML優先）を入れる
+        if (!title.value.trim() || titleAuto) {
+          const pick = files.find(f => /\.html?$/i.test(f.name)) || files.find(f => /\.(css|js)$/i.test(f.name));
+          if (pick) { title.value = pick.name.replace(/\.[^.]+$/, "").slice(0, 80); titleAuto = true; }
         }
       }
       showFileInfo(okList, errs);
@@ -677,15 +680,15 @@
     }
     const modeCode = h("button", { class: "tab", type: "button", onclick: () => setMode("code") }, "コード入力");
     const modeFile = h("button", { class: "tab", type: "button", onclick: () => setMode("file") }, "ファイル添付");
-    const modeTabs = h("div", { class: "tabs" }, modeCode, modeFile);
-    setMode("code");
+    const modeTabs = h("div", { class: "tabs" }, modeFile, modeCode);
+    setMode(editing ? "code" : "file");   // 新規は「ファイル添付」から、編集は既存コードが見える「コード入力」から
 
     const btn = h("button", { class: "btn primary", type: "submit" }, editing ? "保存" : "投稿する");
     const back = editing ? `#/post/${post.id}` : `#/project/${project.id}`;
     const form = h("form", { class: "card" },
       h("h1", {}, editing ? "投稿を編集" : "コードを投稿"),
       h("p", { class: "muted" }, "企画：" + project.title),
-      h("p", { class: "notice" }, "投稿できるのは HTML / CSS / JavaScript のコードだけです（各200KBまで）。投稿したコードは誰でも閲覧・ダウンロードできます。"),
+      h("p", { class: "notice" }, "投稿できるのは HTML / CSS / JavaScript のコードだけです（各500KBまで）。投稿したコードは誰でも閲覧・ダウンロードできます。"),
       field("タイトル", title),
       modeTabs, codeFields, fileBox,
       field("メモ（任意）", memo, "改善した点・変更点・使い方などを自由に書けます（2000文字まで）。投稿ページに表示されます。"),
