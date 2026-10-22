@@ -195,6 +195,7 @@
     zip.file("index.html", compose(p, true));
     if (p.css) zip.file("style.css", p.css);
     if (p.js) zip.file("script.js", p.js);
+    if (p.memo) zip.file("memo.txt", p.memo);
     download(safeName(p.title) + ".zip", await zip.generateAsync({ type: "blob" }));
   }
 
@@ -208,6 +209,7 @@
       dir.file("index.html", compose(p, true));
       if (p.css) dir.file("style.css", p.css);
       if (p.js) dir.file("script.js", p.js);
+      if (p.memo) dir.file("memo.txt", p.memo);
     });
     download(safeName(project.title) + ".zip", await zip.generateAsync({ type: "blob" }));
   }
@@ -490,11 +492,68 @@
     return !!session && (project.owner_id === session.user.id || project.allow_others_post);
   }
 
+  // 企画ページのコメント欄（改善すべき点などを書き込める）
+  function commentsSection(project, commentsRes) {
+    const box = h("div", { class: "card" });
+    if (commentsRes.error) {
+      box.append(h("h2", {}, "コメント"),
+        h("p", { class: "muted" }, "コメントを読み込めませんでした。（データベースの更新が済んでいない可能性があります）"));
+      return box;
+    }
+    const comments = commentsRes.data;
+    box.append(h("h2", {}, `💬 コメント（${comments.length}）`),
+      h("p", { class: "muted", style: "margin-top:0" }, "この企画への改善点・感想などを書き込めます。"));
+
+    if (session) {
+      const body = h("textarea", { rows: 3, maxlength: 1000, required: true, placeholder: "例：スマホで表示が崩れます。ボタンを大きくするとよさそうです。" });
+      const btn = h("button", { class: "btn primary", type: "submit" }, "コメントする");
+      const form = h("form", { class: "comment-form" }, body, h("div", { class: "actions" }, btn));
+      form.addEventListener("submit", e => {
+        e.preventDefault();
+        busy(btn, async () => {
+          const text = body.value.trim();
+          if (!text) throw new Error("コメントを入力してください。");
+          const { error } = await sb.from("comments").insert({ project_id: project.id, author_id: session.user.id, body: text });
+          if (error) throw error;
+          toast("コメントしました");
+          route();
+        });
+      });
+      box.append(form);
+    } else {
+      box.append(h("p", {}, h("a", { href: "#/login" }, "ログイン"), "するとコメントできます。"));
+    }
+
+    if (!comments.length) box.append(h("p", { class: "muted" }, "まだコメントがありません。"));
+    comments.forEach(c => {
+      const item = h("div", { class: "comment" },
+        h("div", { class: "meta" }, h("strong", {}, "@" + (c.author ? c.author.username : "?")), h("span", {}, fmtDate(c.created_at))),
+        h("p", { class: "body" }, c.body));
+      if (session && (c.author_id === session.user.id || project.owner_id === session.user.id)) {
+        const del = h("button", { class: "btn small danger", type: "button" }, "削除");
+        del.addEventListener("click", () => {
+          if (!confirm("このコメントを削除します。よろしいですか？")) return;
+          busy(del, async () => {
+            const { error } = await sb.from("comments").delete().eq("id", c.id);
+            if (error) throw error;
+            toast("削除しました");
+            route();
+          });
+        });
+        item.append(del);
+      }
+      box.append(item);
+    });
+    return box;
+  }
+
   async function viewProject(id) {
-    const [project, postsRes] = await Promise.all([
+    const [project, postsRes, commentsRes] = await Promise.all([
       fetchProject(id),
       sb.from("posts").select("id,title,created_at,author_id,author:profiles(username)")
-        .eq("project_id", id).order("created_at", { ascending: false })
+        .eq("project_id", id).order("created_at", { ascending: false }),
+      sb.from("comments").select("id,body,created_at,author_id,author:profiles(username)")
+        .eq("project_id", id).order("created_at", { ascending: true })
     ]);
     if (!project) return notFound();
     if (postsRes.error) throw postsRes.error;
@@ -527,7 +586,8 @@
           h("div", { class: "actions" }, zipBtn, isOwner ? h("a", { class: "btn", href: `#/project/${id}/edit` }, "⚙ 設定") : null)),
         project.description ? h("p", { style: "white-space:pre-wrap;margin:0" }, project.description) : null),
       h("div", { class: "page-head" }, h("h2", {}, `投稿（${posts.length}）`), postAction),
-      list);
+      list,
+      commentsSection(project, commentsRes));
   }
 
   /* ======================================================
@@ -547,6 +607,10 @@
     const html = mk(post && post.html, "<h1>Hello!</h1>\n<button id=\"btn\">押してね</button>");
     const css = mk(post && post.css, "h1 { color: tomato; }");
     const js = mk(post && post.js, "document.getElementById('btn').onclick = () => alert('hi');");
+    const memo = h("textarea", {
+      rows: 4, maxlength: 2000, value: (post && post.memo) || "",
+      placeholder: "例：v2 ボタンの色を変更。スマホ表示を修正。使い方は〜"
+    });
 
     const previewBox = h("div", { class: "preview-box hidden" });
     const prevBtn = h("button", { class: "btn", type: "button" }, "▶ プレビュー");
@@ -624,13 +688,14 @@
       h("p", { class: "notice" }, "投稿できるのは HTML / CSS / JavaScript のコードだけです（各200KBまで）。投稿したコードは誰でも閲覧・ダウンロードできます。"),
       field("タイトル", title),
       modeTabs, codeFields, fileBox,
+      field("メモ（任意）", memo, "改善した点・変更点・使い方などを自由に書けます（2000文字まで）。投稿ページに表示されます。"),
       h("div", { class: "actions" }, btn, prevBtn, h("a", { class: "btn", href: back }, "キャンセル")),
       previewBox);
 
     form.addEventListener("submit", e => {
       e.preventDefault();
       busy(btn, async () => {
-        const row = { title: title.value.trim(), html: html.value, css: css.value, js: js.value };
+        const row = { title: title.value.trim(), html: html.value, css: css.value, js: js.value, memo: memo.value.trim() };
         if (!row.title) throw new Error("タイトルを入力してください。");
         if (!row.html.trim() && !row.css.trim() && !row.js.trim()) throw new Error("HTML / CSS / JavaScript のいずれかを入力してください。");
         for (const k of ["html", "css", "js"]) {
@@ -732,6 +797,9 @@
             h("h1", {}, post.title),
             h("div", { class: "meta" }, h("span", {}, "@" + (post.author ? post.author.username : "?")), h("span", {}, fmtDate(post.created_at)))),
           actions),
+        post.memo ? h("div", { class: "memo" },
+          h("h3", {}, "📝 投稿者のメモ"),
+          h("p", {}, post.memo)) : null,
         h("p", { class: "notice" }, "投稿者が書いたコードです。プレビューは隔離された領域で実行されています。ダウンロードしたコードは、内容を確認してから実行してください。"),
         tabs, body));
   }
