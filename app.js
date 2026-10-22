@@ -5,6 +5,7 @@
   const app = document.getElementById("app");
   const navEl = document.getElementById("nav");
   const toastEl = document.getElementById("toast");
+  const bellEl = document.getElementById("bell");
 
   /* ======================================================
    * 小さなユーティリティ
@@ -135,6 +136,85 @@
   }
 
   /* ======================================================
+   * 通知（サイト左上のベル）
+   * ==================================================== */
+  let notifs = [];
+  let bellOpen = false;
+  let pendingScroll = null;   // 通知から開いたとき、スクロールして見せるコメントのID
+
+  async function loadNotifs() {
+    if (!session) { notifs = []; bellOpen = false; renderBell(); return; }
+    const { data, error } = await sb.from("notifications")
+      .select("id,type,created_at,read_at,project_id,comment_id,actor:profiles!actor_id(username),project:projects(title),comment:comments(body)")
+      .order("created_at", { ascending: false }).limit(30);
+    if (error) console.error(error);
+    notifs = error ? [] : data;
+    renderBell();
+  }
+
+  function notifText(n) {
+    const who = "@" + (n.actor ? n.actor.username : "?");
+    return n.type === "reply"
+      ? `${who} さんがあなたのコメントに返信しました`
+      : `${who} さんがあなたの企画「${n.project ? n.project.title : ""}」にコメントしました`;
+  }
+
+  function renderBell() {
+    bellEl.replaceChildren();
+    if (!session) return;
+    const unread = notifs.filter(n => !n.read_at).length;
+    const btn = h("button", { class: "bell-btn", type: "button", "aria-label": "通知" + (unread ? `（未読${unread}件）` : ""), "aria-expanded": String(bellOpen) },
+      "🔔", unread ? h("span", { class: "bell-count" }, unread > 99 ? "99+" : String(unread)) : null);
+    btn.addEventListener("click", e => { e.stopPropagation(); bellOpen = !bellOpen; renderBell(); });
+    bellEl.append(btn);
+    if (!bellOpen) return;
+
+    const panel = h("div", { class: "bell-panel" });
+    panel.addEventListener("click", e => e.stopPropagation());
+    const head = h("div", { class: "bell-head" }, h("strong", {}, "通知"));
+    if (unread) {
+      const all = h("button", { class: "btn small", type: "button" }, "すべて既読にする");
+      all.addEventListener("click", () => busy(all, markAllRead));
+      head.append(all);
+    }
+    panel.append(head);
+    if (!notifs.length) panel.append(h("p", { class: "muted bell-empty" }, "通知はまだありません。"));
+    notifs.forEach(n => {
+      const item = h("button", { class: "bell-item" + (n.read_at ? "" : " unread"), type: "button" },
+        h("div", { class: "t" }, notifText(n)),
+        n.comment ? h("div", { class: "ex" }, n.comment.body) : null,
+        h("div", { class: "d" }, fmtDate(n.created_at)));
+      item.addEventListener("click", () => openNotif(n));
+      panel.append(item);
+    });
+    bellEl.append(panel);
+  }
+
+  async function markAllRead() {
+    const now = new Date().toISOString();
+    const { error } = await sb.from("notifications").update({ read_at: now }).eq("user_id", session.user.id).is("read_at", null);
+    if (error) throw error;
+    notifs.forEach(n => { if (!n.read_at) n.read_at = now; });
+    renderBell();
+  }
+
+  function openNotif(n) {
+    bellOpen = false;
+    if (!n.read_at) {
+      n.read_at = new Date().toISOString();
+      sb.from("notifications").update({ read_at: n.read_at }).eq("id", n.id).then(r => { if (r.error) console.error(r.error); });
+    }
+    renderBell();
+    const target = `#/project/${n.project_id}`;
+    pendingScroll = n.comment_id;
+    if (location.hash === target) route(); else go(target);
+  }
+
+  document.addEventListener("click", () => { if (bellOpen) { bellOpen = false; renderBell(); } });
+  document.addEventListener("keydown", e => { if (e.key === "Escape" && bellOpen) { bellOpen = false; renderBell(); } });
+  setInterval(() => { if (session && !document.hidden) loadNotifs(); }, 60000);
+
+  /* ======================================================
    * コードの組み立て（プレビュー / ダウンロード共通）
    * ==================================================== */
   function escHtml(s) {
@@ -224,6 +304,7 @@
    * ==================================================== */
   async function route() {
     const token = ++renderToken;
+    loadNotifs();   // ベルの更新（待たない）
     const seg = location.hash.replace(/^#\/?/, "").split("?")[0].split("/").filter(Boolean);
     try {
       let view;
@@ -242,7 +323,10 @@
       else view = h("div", { class: "card" }, h("h2", {}, "ページが見つかりません"), h("a", { href: "#/" }, "トップへ戻る"));
       if (token !== renderToken) return;
       app.replaceChildren(view);
-      window.scrollTo(0, 0);
+      const target = pendingScroll && document.getElementById("c-" + pendingScroll);
+      pendingScroll = null;
+      if (target) { target.scrollIntoView({ block: "center" }); target.classList.add("flash"); }
+      else window.scrollTo(0, 0);
     } catch (e) {
       console.error(e);
       if (token !== renderToken) return;
@@ -530,14 +614,54 @@
     }
 
     if (!comments.length) box.append(h("p", { class: "muted" }, "まだコメントがありません。"));
+
+    // 返信は親コメントの下に表示する（親 → 子のツリー）
+    const byParent = new Map();
     comments.forEach(c => {
-      const item = h("div", { class: "comment" },
-        h("div", { class: "meta" }, h("strong", {}, "@" + (c.author ? c.author.username : "?")), h("span", {}, fmtDate(c.created_at))),
-        h("p", { class: "body" }, c.body));
+      const k = c.parent_id || "";
+      if (!byParent.has(k)) byParent.set(k, []);
+      byParent.get(k).push(c);
+    });
+
+    function renderComment(c, depth) {
+      const name = c.author ? c.author.username : "?";
+      const kids = byParent.get(c.id) || [];
+      const actions = h("div", { class: "actions" });
+      const replyHolder = h("div", {});
+      const item = h("div", { class: "comment", id: "c-" + c.id },
+        h("div", { class: "meta" }, h("strong", {}, "@" + name), h("span", {}, fmtDate(c.created_at))),
+        h("p", { class: "body" }, c.body), actions, replyHolder);
+
+      if (session) {
+        const replyBtn = h("button", { class: "btn small", type: "button" }, "↩ 返信");
+        replyBtn.addEventListener("click", () => {
+          if (replyHolder.firstChild) { replyHolder.replaceChildren(); return; }
+          const ta = h("textarea", { rows: 2, maxlength: 1000, required: true, placeholder: `@${name} さんへの返信` });
+          const send = h("button", { class: "btn small primary", type: "submit" }, "返信する");
+          const cancel = h("button", { class: "btn small", type: "button", onclick: () => replyHolder.replaceChildren() }, "キャンセル");
+          const f = h("form", { class: "comment-form reply-form" }, ta, h("div", { class: "actions" }, send, cancel));
+          f.addEventListener("submit", e => {
+            e.preventDefault();
+            busy(send, async () => {
+              const text = ta.value.trim();
+              if (!text) throw new Error("返信を入力してください。");
+              const { error } = await sb.from("comments").insert({ project_id: project.id, author_id: session.user.id, body: text, parent_id: c.id });
+              if (error) throw error;
+              toast("返信しました");
+              route();
+            });
+          });
+          replyHolder.append(f);
+          ta.focus();
+        });
+        actions.append(replyBtn);
+      }
+
       if (session && (c.author_id === session.user.id || project.owner_id === session.user.id || isAdmin)) {
         const del = h("button", { class: "btn small danger", type: "button" }, "削除");
         del.addEventListener("click", () => {
-          if (!confirm("このコメントを削除します。よろしいですか？")) return;
+          const msg = kids.length ? "このコメントを削除します。これに対する返信もすべて削除されます。よろしいですか？" : "このコメントを削除します。よろしいですか？";
+          if (!confirm(msg)) return;
           busy(del, async () => {
             const { error } = await sb.from("comments").delete().eq("id", c.id);
             if (error) throw error;
@@ -545,10 +669,18 @@
             route();
           });
         });
-        item.append(del);
+        actions.append(del);
       }
-      box.append(item);
-    });
+
+      if (kids.length) {
+        const wrap = h("div", { class: "replies" + (depth >= 3 ? " flat" : "") });
+        kids.forEach(k => wrap.append(renderComment(k, depth + 1)));
+        item.append(wrap);
+      }
+      return item;
+    }
+
+    (byParent.get("") || []).forEach(c => box.append(renderComment(c, 0)));
     return box;
   }
 
@@ -557,7 +689,7 @@
       fetchProject(id),
       sb.from("posts").select("id,title,created_at,author_id,author:profiles(username)")
         .eq("project_id", id).order("created_at", { ascending: false }),
-      sb.from("comments").select("id,body,created_at,author_id,author:profiles(username)")
+      sb.from("comments").select("id,body,created_at,author_id,parent_id,author:profiles(username)")
         .eq("project_id", id).order("created_at", { ascending: true })
     ]);
     if (!project) return notFound();
@@ -575,11 +707,21 @@
     const list = h("div", {});
     if (!posts.length) list.append(h("p", { class: "muted" }, "まだ投稿がありません。"));
     posts.forEach(p => {
+      // 投稿のコードを取得して、HTML1ファイルとしてそのままダウンロード
+      const dlBtn = h("button", { class: "btn small", type: "button" }, "⬇ htmlとしてダウンロード");
+      dlBtn.addEventListener("click", () => busy(dlBtn, async () => {
+        const { data, error } = await sb.from("posts").select("*").eq("id", p.id).maybeSingle();
+        if (error) throw error;
+        if (!data) throw new Error("投稿が見つかりません。");
+        downloadSingleHtml(data);
+      }));
       list.append(h("div", { class: "card post-item" },
         h("div", { class: "info" },
           h("h3", {}, h("a", { href: `#/post/${p.id}` }, p.title)),
           h("div", { class: "meta" }, h("span", {}, "@" + (p.author ? p.author.username : "?")), h("span", {}, fmtDate(p.created_at)))),
-        h("a", { class: "btn small", href: `#/post/${p.id}` }, "開く")));
+        h("div", { class: "actions" },
+          h("a", { class: "btn small", href: `#/post/${p.id}` }, "開く"),
+          dlBtn)));
     });
 
     return h("section", {},
