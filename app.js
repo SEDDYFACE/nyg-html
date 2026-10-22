@@ -81,14 +81,19 @@
 
   let session = null;
   let profile = null;
+  let isAdmin = false;     // 管理者か（データベース側の admins 表で決まる）
   let lastUserId;          // undefined = 未初期化
   let renderToken = 0;
 
   async function loadProfile() {
     profile = null;
+    isAdmin = false;
     if (!session) return;
     const { data } = await sb.from("profiles").select("id,username").eq("id", session.user.id).maybeSingle();
     profile = data;
+    // 管理者かどうかの確認（画面の出し分け用。実際の権限はデータベース側で強制される）
+    const { data: adm } = await sb.rpc("is_admin");
+    isAdmin = adm === true;
   }
 
   sb.auth.onAuthStateChange((event, s) => {
@@ -116,7 +121,7 @@
     navEl.replaceChildren();
     if (session) {
       navEl.append(
-        h("span", { class: "who" }, profile ? `@${profile.username}` : ""),
+        h("span", { class: "who" }, profile ? `@${profile.username}` : "", isAdmin ? h("span", { class: "badge open", style: "margin-left:.4rem" }, "管理者") : null),
         h("a", { class: "btn small primary", href: "#/new-project" }, "＋ 企画を作る"),
         h("button", {
           class: "btn small", type: "button",
@@ -456,7 +461,7 @@
     if (!session) return needLogin("ログインが必要です。");
     const project = await fetchProject(id);
     if (!project) return notFound();
-    if (project.owner_id !== session.user.id) return h("div", { class: "error-box" }, "企画主だけが設定を変更できます。");
+    if (project.owner_id !== session.user.id && !isAdmin) return h("div", { class: "error-box" }, "企画主だけが設定を変更できます。");
 
     const f = projectFormFields(project);
     const saveBtn = h("button", { class: "btn primary", type: "submit" }, "保存");
@@ -529,7 +534,7 @@
       const item = h("div", { class: "comment" },
         h("div", { class: "meta" }, h("strong", {}, "@" + (c.author ? c.author.username : "?")), h("span", {}, fmtDate(c.created_at))),
         h("p", { class: "body" }, c.body));
-      if (session && (c.author_id === session.user.id || project.owner_id === session.user.id)) {
+      if (session && (c.author_id === session.user.id || project.owner_id === session.user.id || isAdmin)) {
         const del = h("button", { class: "btn small danger", type: "button" }, "削除");
         del.addEventListener("click", () => {
           if (!confirm("このコメントを削除します。よろしいですか？")) return;
@@ -558,7 +563,7 @@
     if (!project) return notFound();
     if (postsRes.error) throw postsRes.error;
     const posts = postsRes.data;
-    const isOwner = !!session && project.owner_id === session.user.id;
+    const isOwner = !!session && (project.owner_id === session.user.id || isAdmin);
 
     const zipBtn = h("button", { class: "btn", type: "button" }, "⬇ 企画まるごとZIP");
     zipBtn.addEventListener("click", () => busy(zipBtn, () => downloadProjectZip(project)));
@@ -740,15 +745,15 @@
     if (!session) return needLogin("ログインが必要です。");
     const post = await fetchPost(id);
     if (!post) return notFound();
-    if (post.author_id !== session.user.id) return h("div", { class: "error-box" }, "投稿者本人だけが編集できます。");
+    if (post.author_id !== session.user.id && !isAdmin) return h("div", { class: "error-box" }, "投稿者本人だけが編集できます。");
     return postForm(post.project, post);
   }
 
   async function viewPost(id) {
     const post = await fetchPost(id);
     if (!post) return notFound();
-    const isAuthor = !!session && post.author_id === session.user.id;
-    const isOwner = !!session && post.project.owner_id === session.user.id;
+    const isAuthor = !!session && (post.author_id === session.user.id || isAdmin);   // 管理者は編集も可
+    const isOwner = !!session && (post.project.owner_id === session.user.id || isAdmin);
 
     const htmlBtn = h("button", { class: "btn", type: "button" }, "⬇ HTML（1ファイル）");
     htmlBtn.addEventListener("click", () => downloadSingleHtml(post));
