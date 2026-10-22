@@ -1,0 +1,681 @@
+(() => {
+  "use strict";
+
+  const cfg = window.APP_CONFIG || {};
+  const app = document.getElementById("app");
+  const navEl = document.getElementById("nav");
+  const toastEl = document.getElementById("toast");
+
+  /* ======================================================
+   * 小さなユーティリティ
+   * （画面はすべて DOM API で組み立てるので、ユーザー入力が HTML として解釈されることはありません）
+   * ==================================================== */
+  function h(tag, attrs, ...kids) {
+    const el = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs || {})) {
+      if (v === false || v == null) continue;
+      if (k === "class") el.className = v;
+      else if (k === "value") el.value = v;
+      else if (k === "checked") el.checked = !!v;
+      else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+      else el.setAttribute(k, v === true ? "" : v);
+    }
+    for (const kid of kids.flat()) {
+      if (kid == null || kid === false) continue;
+      el.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
+    }
+    return el;
+  }
+
+  function toast(msg, isError) {
+    toastEl.textContent = msg;
+    toastEl.className = "show" + (isError ? " error" : "");
+    clearTimeout(toast.t);
+    toast.t = setTimeout(() => (toastEl.className = ""), 3500);
+  }
+
+  function fmtDate(s) {
+    return new Date(s).toLocaleString("ja-JP", { dateStyle: "medium", timeStyle: "short" });
+  }
+
+  function friendly(err) {
+    const m = (err && err.message) || String(err);
+    if (/Invalid login credentials/i.test(m)) return "ユーザー名またはパスワードが違います。";
+    if (/Email not confirmed/i.test(m)) return "メールアドレスの確認が完了していません。届いたメールのリンクを開いてください。";
+    if (/rate limit|too many/i.test(m)) return "短時間に操作が多すぎます。しばらくしてからやり直してください。";
+    if (/row-level security/i.test(m)) return "この操作を行う権限がありません。";
+    if (/duplicate key/i.test(m)) return "既に使われています。";
+    return m;
+  }
+
+  function field(label, input, hint) {
+    return h("label", { class: "field" },
+      h("span", { class: "label" }, label), input,
+      hint ? h("small", { class: "hint" }, hint) : null);
+  }
+
+  async function busy(btn, fn) {
+    btn.disabled = true;
+    try { await fn(); }
+    catch (e) { console.error(e); toast(friendly(e), true); }
+    finally { btn.disabled = false; }
+  }
+
+  function go(hash) { location.hash = hash; }
+
+  /* ======================================================
+   * 設定チェック & Supabase
+   * ==================================================== */
+  if (!cfg.SUPABASE_URL || /YOUR-/.test(cfg.SUPABASE_URL) || !cfg.SUPABASE_ANON_KEY || /YOUR-/.test(cfg.SUPABASE_ANON_KEY)) {
+    app.replaceChildren(h("div", { class: "card" },
+      h("h2", {}, "初期設定が必要です"),
+      h("p", {}, "config.js に Supabase の URL と anon key を設定してください。（手順は README.md を参照）")));
+    return;
+  }
+
+  const sb = supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY, {
+    auth: { flowType: "pkce" }
+  });
+  const BASE_URL = location.origin + location.pathname;
+  const MAX_CODE = 200000;
+
+  let session = null;
+  let profile = null;
+  let lastUserId;          // undefined = 未初期化
+  let renderToken = 0;
+
+  async function loadProfile() {
+    profile = null;
+    if (!session) return;
+    const { data } = await sb.from("profiles").select("id,username").eq("id", session.user.id).maybeSingle();
+    profile = data;
+  }
+
+  sb.auth.onAuthStateChange((event, s) => {
+    session = s;
+    // コールバック内で直接 await しない（supabase-js の推奨）
+    setTimeout(async () => {
+      const uid = s && s.user ? s.user.id : null;
+      if (event === "PASSWORD_RECOVERY") {
+        lastUserId = uid;
+        await loadProfile();
+        renderNav();
+        if (location.hash !== "#/reset") go("#/reset"); else route();
+        return;
+      }
+      if (event === "INITIAL_SESSION" || uid !== lastUserId) {
+        lastUserId = uid;
+        await loadProfile();
+        renderNav();
+        route();
+      }
+    }, 0);
+  });
+
+  function renderNav() {
+    navEl.replaceChildren();
+    if (session) {
+      navEl.append(
+        h("span", { class: "who" }, profile ? `@${profile.username}` : ""),
+        h("a", { class: "btn small primary", href: "#/new-project" }, "＋ 企画を作る"),
+        h("button", {
+          class: "btn small", type: "button",
+          onclick: async () => { await sb.auth.signOut(); toast("ログアウトしました"); go("#/"); }
+        }, "ログアウト"));
+    } else {
+      navEl.append(
+        h("a", { class: "btn small", href: "#/login" }, "ログイン"),
+        h("a", { class: "btn small primary", href: "#/signup" }, "新規登録"));
+    }
+  }
+
+  /* ======================================================
+   * コードの組み立て（プレビュー / ダウンロード共通）
+   * ==================================================== */
+  function escHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  }
+
+  // linked=false: 1ファイルに埋め込み / linked=true: style.css, script.js を参照
+  function compose(p, linked) {
+    const css = p.css || "";
+    const js = p.js || "";
+    const styleTag = css
+      ? (linked ? '<link rel="stylesheet" href="style.css">' : "<style>\n" + css.replace(/<\/style/gi, "<\\/style") + "\n</style>")
+      : "";
+    const scriptTag = js
+      ? (linked ? '<script src="script.js"></' + "script>" : "<script>\n" + js.replace(/<\/script/gi, "<\\/script") + "\n</" + "script>")
+      : "";
+    const html = p.html || "";
+
+    // HTML欄に <html> 全体を貼った場合にも対応
+    if (/<html[\s>]|<!doctype/i.test(html)) {
+      let out = html;
+      if (styleTag) out = /<\/head>/i.test(out) ? out.replace(/<\/head>/i, () => styleTag + "\n</head>") : styleTag + "\n" + out;
+      if (scriptTag) out = /<\/body>/i.test(out) ? out.replace(/<\/body>/i, () => scriptTag + "\n</body>") : out + "\n" + scriptTag;
+      return out;
+    }
+    return "<!DOCTYPE html>\n<html lang=\"ja\">\n<head>\n<meta charset=\"utf-8\">\n" +
+      "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n" +
+      "<title>" + escHtml(p.title || "") + "</title>\n" + styleTag + "\n</head>\n<body>\n" +
+      html + "\n" + scriptTag + "\n</body>\n</html>\n";
+  }
+
+  // 投稿コードは「サンドボックス化した iframe」でだけ実行する。
+  // allow-same-origin を付けないので、投稿コードからこのサイトのログイン情報等には触れない。
+  function previewFrame(doc) {
+    return h("iframe", {
+      class: "preview",
+      title: "プレビュー",
+      sandbox: "allow-scripts allow-forms allow-modals",
+      referrerpolicy: "no-referrer",
+      srcdoc: doc
+    });
+  }
+
+  function safeName(s) {
+    return (String(s).replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_").trim().slice(0, 40)) || "post";
+  }
+
+  function download(filename, blob) {
+    const url = URL.createObjectURL(blob);
+    const a = h("a", { href: url, download: filename });
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  }
+
+  function downloadSingleHtml(p) {
+    download(safeName(p.title) + ".html", new Blob([compose(p, false)], { type: "text/html;charset=utf-8" }));
+  }
+
+  async function downloadPostZip(p) {
+    const zip = new JSZip();
+    zip.file("index.html", compose(p, true));
+    if (p.css) zip.file("style.css", p.css);
+    if (p.js) zip.file("script.js", p.js);
+    download(safeName(p.title) + ".zip", await zip.generateAsync({ type: "blob" }));
+  }
+
+  async function downloadProjectZip(project) {
+    const { data, error } = await sb.from("posts").select("*").eq("project_id", project.id).order("created_at", { ascending: true });
+    if (error) throw error;
+    if (!data.length) { toast("まだ投稿がありません", true); return; }
+    const zip = new JSZip();
+    data.forEach((p, i) => {
+      const dir = zip.folder(String(i + 1).padStart(2, "0") + "_" + safeName(p.title));
+      dir.file("index.html", compose(p, true));
+      if (p.css) dir.file("style.css", p.css);
+      if (p.js) dir.file("script.js", p.js);
+    });
+    download(safeName(project.title) + ".zip", await zip.generateAsync({ type: "blob" }));
+  }
+
+  /* ======================================================
+   * ルーター
+   * ==================================================== */
+  async function route() {
+    const token = ++renderToken;
+    const seg = location.hash.replace(/^#\/?/, "").split("?")[0].split("/").filter(Boolean);
+    try {
+      let view;
+      const [a, b, c] = seg;
+      if (!a) view = await viewHome();
+      else if (a === "login") view = viewLogin();
+      else if (a === "signup") view = viewSignup();
+      else if (a === "forgot") view = viewForgot();
+      else if (a === "reset") view = viewReset();
+      else if (a === "new-project") view = viewProjectForm(null);
+      else if (a === "project" && b && c === "edit") view = await viewProjectEdit(b);
+      else if (a === "project" && b && c === "new") view = await viewPostNew(b);
+      else if (a === "project" && b) view = await viewProject(b);
+      else if (a === "post" && b && c === "edit") view = await viewPostEdit(b);
+      else if (a === "post" && b) view = await viewPost(b);
+      else view = h("div", { class: "card" }, h("h2", {}, "ページが見つかりません"), h("a", { href: "#/" }, "トップへ戻る"));
+      if (token !== renderToken) return;
+      app.replaceChildren(view);
+      window.scrollTo(0, 0);
+    } catch (e) {
+      console.error(e);
+      if (token !== renderToken) return;
+      app.replaceChildren(h("div", { class: "error-box" }, "エラーが発生しました：" + friendly(e)));
+    }
+  }
+  window.addEventListener("hashchange", route);
+
+  /* ======================================================
+   * 認証まわり
+   * ==================================================== */
+  function viewLogin() {
+    if (session) { setTimeout(() => go("#/"), 0); return h("div"); }
+    const u = h("input", { type: "text", autocomplete: "username", required: true, maxlength: 20 });
+    const p = h("input", { type: "password", autocomplete: "current-password", required: true });
+    const btn = h("button", { class: "btn primary", type: "submit" }, "ログイン");
+    const form = h("form", { class: "card narrow" },
+      h("h1", {}, "ログイン"),
+      field("ユーザー名", u), field("パスワード", p), btn,
+      h("p", { class: "links" }, h("a", { href: "#/forgot" }, "パスワードを忘れた方"), " ・ ", h("a", { href: "#/signup" }, "新規登録")));
+    form.addEventListener("submit", e => {
+      e.preventDefault();
+      busy(btn, async () => {
+        const { data: email, error: e1 } = await sb.rpc("email_for_username", { p_username: u.value.trim() });
+        if (e1) throw e1;
+        if (!email) throw new Error("Invalid login credentials");
+        const { error } = await sb.auth.signInWithPassword({ email, password: p.value });
+        if (error) throw error;
+        toast("ログインしました");
+        go("#/");
+      });
+    });
+    return form;
+  }
+
+  function viewSignup() {
+    if (session) { setTimeout(() => go("#/"), 0); return h("div"); }
+    const email = h("input", { type: "email", autocomplete: "email", required: true });
+    const u = h("input", { type: "text", autocomplete: "username", required: true, maxlength: 20, pattern: "[A-Za-z0-9_]{3,20}" });
+    const p1 = h("input", { type: "password", autocomplete: "new-password", required: true, minlength: 8 });
+    const p2 = h("input", { type: "password", autocomplete: "new-password", required: true, minlength: 8 });
+    const btn = h("button", { class: "btn primary", type: "submit" }, "登録する");
+    const form = h("form", { class: "card narrow" },
+      h("h1", {}, "新規登録"),
+      field("メールアドレス", email, "パスワードを忘れたときの再設定用です（他の人には表示されません）"),
+      field("ユーザー名", u, "半角英数字とアンダースコア、3〜20文字。ログイン時に使います"),
+      field("パスワード", p1, "8文字以上"),
+      field("パスワード（確認）", p2),
+      btn,
+      h("p", { class: "links" }, "アカウントをお持ちの方は ", h("a", { href: "#/login" }, "ログイン")));
+    form.addEventListener("submit", e => {
+      e.preventDefault();
+      busy(btn, async () => {
+        const username = u.value.trim();
+        if (!/^[A-Za-z0-9_]{3,20}$/.test(username)) throw new Error("ユーザー名は半角英数字とアンダースコアの3〜20文字にしてください。");
+        if (p1.value.length < 8) throw new Error("パスワードは8文字以上にしてください。");
+        if (p1.value !== p2.value) throw new Error("パスワードが一致しません。");
+        const { data: ok, error: e1 } = await sb.rpc("username_available", { p_username: username });
+        if (e1) throw e1;
+        if (!ok) throw new Error("そのユーザー名は既に使われています。");
+        const { data, error } = await sb.auth.signUp({
+          email: email.value.trim(),
+          password: p1.value,
+          options: { data: { username }, emailRedirectTo: BASE_URL }
+        });
+        if (error) throw error;
+        if (data.user && Array.isArray(data.user.identities) && data.user.identities.length === 0) {
+          throw new Error("このメールアドレスは既に登録されています。");
+        }
+        if (data.session) {
+          toast("登録しました");
+          go("#/");
+        } else {
+          app.replaceChildren(h("div", { class: "card narrow" },
+            h("h1", {}, "確認メールを送信しました"),
+            h("p", {}, "メール内のリンクを開いて登録を完了してください。完了後、ユーザー名とパスワードでログインできます。"),
+            h("p", { class: "links" }, h("a", { href: "#/login" }, "ログイン画面へ"))));
+        }
+      });
+    });
+    return form;
+  }
+
+  function viewForgot() {
+    const email = h("input", { type: "email", autocomplete: "email", required: true });
+    const btn = h("button", { class: "btn primary", type: "submit" }, "再設定メールを送る");
+    const form = h("form", { class: "card narrow" },
+      h("h1", {}, "パスワードの再設定"),
+      h("p", { class: "muted" }, "登録したメールアドレスを入力してください。再設定用のリンクをお送りします。"),
+      field("メールアドレス", email), btn,
+      h("p", { class: "links" }, h("a", { href: "#/login" }, "ログインへ戻る")));
+    form.addEventListener("submit", e => {
+      e.preventDefault();
+      busy(btn, async () => {
+        const { error } = await sb.auth.resetPasswordForEmail(email.value.trim(), { redirectTo: BASE_URL });
+        if (error) throw error;
+        // 登録の有無は教えない
+        form.replaceChildren(h("h1", {}, "送信しました"),
+          h("p", {}, "登録されているメールアドレスであれば、再設定用のメールが届きます。メール内のリンクを、このブラウザで開いてください。"),
+          h("p", { class: "links" }, h("a", { href: "#/login" }, "ログインへ戻る")));
+      });
+    });
+    return form;
+  }
+
+  function viewReset() {
+    if (!session) {
+      return h("div", { class: "card narrow" }, h("h1", {}, "リンクが無効です"),
+        h("p", {}, "再設定メールのリンクを、メールを請求したのと同じブラウザで開いてください。リンクの期限切れの場合は、もう一度メールを請求してください。"),
+        h("p", { class: "links" }, h("a", { href: "#/forgot" }, "再設定メールを送る")));
+    }
+    const p1 = h("input", { type: "password", autocomplete: "new-password", required: true, minlength: 8 });
+    const p2 = h("input", { type: "password", autocomplete: "new-password", required: true, minlength: 8 });
+    const btn = h("button", { class: "btn primary", type: "submit" }, "パスワードを変更");
+    const form = h("form", { class: "card narrow" },
+      h("h1", {}, "新しいパスワード"),
+      field("新しいパスワード", p1, "8文字以上"), field("新しいパスワード（確認）", p2), btn);
+    form.addEventListener("submit", e => {
+      e.preventDefault();
+      busy(btn, async () => {
+        if (p1.value !== p2.value) throw new Error("パスワードが一致しません。");
+        const { error } = await sb.auth.updateUser({ password: p1.value });
+        if (error) throw error;
+        toast("パスワードを変更しました");
+        go("#/");
+      });
+    });
+    return form;
+  }
+
+  /* ======================================================
+   * 企画
+   * ==================================================== */
+  function openBadge(p) {
+    return p.allow_others_post
+      ? h("span", { class: "badge open" }, "みんなで投稿OK")
+      : h("span", { class: "badge" }, "企画主のみ投稿");
+  }
+
+  function projectCard(p) {
+    const count = p.posts && p.posts[0] ? p.posts[0].count : 0;
+    return h("a", { class: "card project-card", href: `#/project/${p.id}` },
+      h("h3", {}, p.title),
+      p.description ? h("p", { class: "desc" }, p.description) : null,
+      h("div", { class: "meta" },
+        openBadge(p),
+        h("span", {}, "企画主 @" + (p.owner ? p.owner.username : "?")),
+        h("span", {}, `投稿 ${count}件`)));
+  }
+
+  async function viewHome() {
+    const { data, error } = await sb.from("projects")
+      .select("id,title,description,allow_others_post,created_at,owner:profiles(username),posts(count)")
+      .order("created_at", { ascending: false });
+    if (error) throw error;
+
+    const search = h("input", { type: "search", class: "search", placeholder: "企画を検索…" });
+    const list = h("div", { class: "grid" });
+    function draw() {
+      const q = search.value.trim().toLowerCase();
+      const items = data.filter(p => !q || (p.title + " " + p.description).toLowerCase().includes(q));
+      list.replaceChildren();
+      if (!items.length) list.append(h("p", { class: "muted" }, data.length ? "該当する企画がありません。" : "まだ企画がありません。最初の企画を作ってみましょう！"));
+      items.forEach(p => list.append(projectCard(p)));
+    }
+    search.addEventListener("input", draw);
+    draw();
+
+    return h("section", {},
+      h("div", { class: "page-head" },
+        h("h1", {}, "企画一覧"),
+        session ? h("a", { class: "btn primary", href: "#/new-project" }, "＋ 企画を作る") : null),
+      search, list);
+  }
+
+  function projectFormFields(project) {
+    const title = h("input", { type: "text", required: true, maxlength: 60, value: project ? project.title : "" });
+    const desc = h("textarea", { rows: 4, maxlength: 500, value: project ? project.description : "" });
+    const allow = h("input", { type: "checkbox", checked: project ? project.allow_others_post : false });
+    const allowRow = h("label", { class: "check" }, allow,
+      h("span", {}, "他の人もこの企画に投稿できるようにする",
+        h("small", { class: "hint" }, "オフの場合、投稿できるのは企画主だけです。どちらの場合も、投稿されたコードは誰でもダウンロードできます。後から変更できます。")));
+    return { title, desc, allow, nodes: [field("企画名", title), field("説明（任意）", desc, "500文字まで"), allowRow] };
+  }
+
+  function viewProjectForm(project) {
+    if (!session) return needLogin("企画を作るにはログインが必要です。");
+    const f = projectFormFields(project);
+    const btn = h("button", { class: "btn primary", type: "submit" }, "企画を作成");
+    const form = h("form", { class: "card" }, h("h1", {}, "新しい企画"), ...f.nodes,
+      h("div", { class: "actions" }, btn, h("a", { class: "btn", href: "#/" }, "キャンセル")));
+    form.addEventListener("submit", e => {
+      e.preventDefault();
+      busy(btn, async () => {
+        const { data, error } = await sb.from("projects").insert({
+          owner_id: session.user.id,
+          title: f.title.value.trim(),
+          description: f.desc.value.trim(),
+          allow_others_post: f.allow.checked
+        }).select("id").single();
+        if (error) throw error;
+        toast("企画を作成しました");
+        go(`#/project/${data.id}`);
+      });
+    });
+    return form;
+  }
+
+  async function fetchProject(id) {
+    const { data, error } = await sb.from("projects").select("*, owner:profiles(username)").eq("id", id).maybeSingle();
+    if (error) throw error;
+    return data;
+  }
+
+  async function viewProjectEdit(id) {
+    if (!session) return needLogin("ログインが必要です。");
+    const project = await fetchProject(id);
+    if (!project) return notFound();
+    if (project.owner_id !== session.user.id) return h("div", { class: "error-box" }, "企画主だけが設定を変更できます。");
+
+    const f = projectFormFields(project);
+    const saveBtn = h("button", { class: "btn primary", type: "submit" }, "保存");
+    const delBtn = h("button", { class: "btn danger", type: "button" }, "この企画を削除");
+    const form = h("form", { class: "card" }, h("h1", {}, "企画の設定"), ...f.nodes,
+      h("div", { class: "actions" }, saveBtn, h("a", { class: "btn", href: `#/project/${id}` }, "キャンセル"), delBtn));
+    form.addEventListener("submit", e => {
+      e.preventDefault();
+      busy(saveBtn, async () => {
+        const { error } = await sb.from("projects").update({
+          title: f.title.value.trim(),
+          description: f.desc.value.trim(),
+          allow_others_post: f.allow.checked
+        }).eq("id", id);
+        if (error) throw error;
+        toast("保存しました");
+        go(`#/project/${id}`);
+      });
+    });
+    delBtn.addEventListener("click", () => {
+      if (!confirm("この企画と、中のすべての投稿を削除します。元に戻せません。よろしいですか？")) return;
+      busy(delBtn, async () => {
+        const { error } = await sb.from("projects").delete().eq("id", id);
+        if (error) throw error;
+        toast("企画を削除しました");
+        go("#/");
+      });
+    });
+    return form;
+  }
+
+  function canPost(project) {
+    return !!session && (project.owner_id === session.user.id || project.allow_others_post);
+  }
+
+  async function viewProject(id) {
+    const [project, postsRes] = await Promise.all([
+      fetchProject(id),
+      sb.from("posts").select("id,title,created_at,author_id,author:profiles(username)")
+        .eq("project_id", id).order("created_at", { ascending: false })
+    ]);
+    if (!project) return notFound();
+    if (postsRes.error) throw postsRes.error;
+    const posts = postsRes.data;
+    const isOwner = !!session && project.owner_id === session.user.id;
+
+    const zipBtn = h("button", { class: "btn", type: "button" }, "⬇ 企画まるごとZIP");
+    zipBtn.addEventListener("click", () => busy(zipBtn, () => downloadProjectZip(project)));
+
+    let postAction;
+    if (canPost(project)) postAction = h("a", { class: "btn primary", href: `#/project/${id}/new` }, "＋ コードを投稿");
+    else if (!session && project.allow_others_post) postAction = h("a", { class: "btn primary", href: "#/login" }, "ログインして投稿");
+
+    const list = h("div", {});
+    if (!posts.length) list.append(h("p", { class: "muted" }, "まだ投稿がありません。"));
+    posts.forEach(p => {
+      list.append(h("div", { class: "card post-item" },
+        h("div", { class: "info" },
+          h("h3", {}, h("a", { href: `#/post/${p.id}` }, p.title)),
+          h("div", { class: "meta" }, h("span", {}, "@" + (p.author ? p.author.username : "?")), h("span", {}, fmtDate(p.created_at)))),
+        h("a", { class: "btn small", href: `#/post/${p.id}` }, "開く")));
+    });
+
+    return h("section", {},
+      h("div", { class: "card" },
+        h("div", { class: "page-head" },
+          h("div", {},
+            h("h1", {}, project.title),
+            h("div", { class: "meta" }, openBadge(project), h("span", {}, "企画主 @" + (project.owner ? project.owner.username : "?")), h("span", {}, fmtDate(project.created_at)))),
+          h("div", { class: "actions" }, zipBtn, isOwner ? h("a", { class: "btn", href: `#/project/${id}/edit` }, "⚙ 設定") : null)),
+        project.description ? h("p", { style: "white-space:pre-wrap;margin:0" }, project.description) : null),
+      h("div", { class: "page-head" }, h("h2", {}, `投稿（${posts.length}）`), postAction),
+      list);
+  }
+
+  /* ======================================================
+   * 投稿
+   * ==================================================== */
+  function needLogin(msg) {
+    return h("div", { class: "card narrow" }, h("h2", {}, msg), h("p", { class: "links" }, h("a", { href: "#/login" }, "ログイン"), " ・ ", h("a", { href: "#/signup" }, "新規登録")));
+  }
+  function notFound() {
+    return h("div", { class: "card" }, h("h2", {}, "見つかりませんでした"), h("a", { href: "#/" }, "トップへ戻る"));
+  }
+
+  function postForm(project, post) {
+    const editing = !!post;
+    const title = h("input", { type: "text", required: true, maxlength: 80, value: post ? post.title : "" });
+    const mk = (v, ph) => h("textarea", { class: "code", rows: 12, spellcheck: "false", autocapitalize: "off", placeholder: ph, value: v || "" });
+    const html = mk(post && post.html, "<h1>Hello!</h1>\n<button id=\"btn\">押してね</button>");
+    const css = mk(post && post.css, "h1 { color: tomato; }");
+    const js = mk(post && post.js, "document.getElementById('btn').onclick = () => alert('hi');");
+
+    const previewBox = h("div", { class: "preview-box hidden" });
+    const prevBtn = h("button", { class: "btn", type: "button" }, "▶ プレビュー");
+    prevBtn.addEventListener("click", () => {
+      previewBox.classList.remove("hidden");
+      previewBox.replaceChildren(previewFrame(compose({ title: title.value, html: html.value, css: css.value, js: js.value }, false)));
+    });
+
+    const btn = h("button", { class: "btn primary", type: "submit" }, editing ? "保存" : "投稿する");
+    const back = editing ? `#/post/${post.id}` : `#/project/${project.id}`;
+    const form = h("form", { class: "card" },
+      h("h1", {}, editing ? "投稿を編集" : "コードを投稿"),
+      h("p", { class: "muted" }, "企画：" + project.title),
+      h("p", { class: "notice" }, "投稿できるのは HTML / CSS / JavaScript のコードだけです（各200KBまで）。投稿したコードは誰でも閲覧・ダウンロードできます。"),
+      field("タイトル", title),
+      field("HTML", html, "<body> の中身を書いてください（<html> から始まる完全なHTMLでもOK）"),
+      field("CSS", css),
+      field("JavaScript", js),
+      h("div", { class: "actions" }, btn, prevBtn, h("a", { class: "btn", href: back }, "キャンセル")),
+      previewBox);
+
+    form.addEventListener("submit", e => {
+      e.preventDefault();
+      busy(btn, async () => {
+        const row = { title: title.value.trim(), html: html.value, css: css.value, js: js.value };
+        if (!row.title) throw new Error("タイトルを入力してください。");
+        if (!row.html.trim() && !row.css.trim() && !row.js.trim()) throw new Error("HTML / CSS / JavaScript のいずれかを入力してください。");
+        for (const k of ["html", "css", "js"]) {
+          if (row[k].length > MAX_CODE) throw new Error(`${k.toUpperCase()} が大きすぎます（${MAX_CODE.toLocaleString()}文字まで）。`);
+        }
+        if (editing) {
+          const { error } = await sb.from("posts").update({ ...row, updated_at: new Date().toISOString() }).eq("id", post.id);
+          if (error) throw error;
+          toast("保存しました");
+          go(`#/post/${post.id}`);
+        } else {
+          const { data, error } = await sb.from("posts")
+            .insert({ ...row, project_id: project.id, author_id: session.user.id }).select("id").single();
+          if (error) throw error;
+          toast("投稿しました");
+          go(`#/post/${data.id}`);
+        }
+      });
+    });
+    return form;
+  }
+
+  async function viewPostNew(projectId) {
+    if (!session) return needLogin("投稿するにはログインが必要です。");
+    const project = await fetchProject(projectId);
+    if (!project) return notFound();
+    if (!canPost(project)) return h("div", { class: "error-box" }, "この企画は企画主のみ投稿できます。");
+    return postForm(project, null);
+  }
+
+  async function fetchPost(id) {
+    const { data, error } = await sb.from("posts")
+      .select("*, author:profiles(username), project:projects(id,title,owner_id)").eq("id", id).maybeSingle();
+    if (error) throw error;
+    return data;
+  }
+
+  async function viewPostEdit(id) {
+    if (!session) return needLogin("ログインが必要です。");
+    const post = await fetchPost(id);
+    if (!post) return notFound();
+    if (post.author_id !== session.user.id) return h("div", { class: "error-box" }, "投稿者本人だけが編集できます。");
+    return postForm(post.project, post);
+  }
+
+  async function viewPost(id) {
+    const post = await fetchPost(id);
+    if (!post) return notFound();
+    const isAuthor = !!session && post.author_id === session.user.id;
+    const isOwner = !!session && post.project.owner_id === session.user.id;
+
+    const htmlBtn = h("button", { class: "btn", type: "button" }, "⬇ HTML（1ファイル）");
+    htmlBtn.addEventListener("click", () => downloadSingleHtml(post));
+    const zipBtn = h("button", { class: "btn", type: "button" }, "⬇ ZIP（分割）");
+    zipBtn.addEventListener("click", () => busy(zipBtn, () => downloadPostZip(post)));
+
+    const actions = h("div", { class: "actions" }, htmlBtn, zipBtn);
+    if (isAuthor) actions.append(h("a", { class: "btn", href: `#/post/${id}/edit` }, "編集"));
+    if (isAuthor || isOwner) {
+      const del = h("button", { class: "btn danger", type: "button" }, "削除");
+      del.addEventListener("click", () => {
+        if (!confirm("この投稿を削除します。よろしいですか？")) return;
+        busy(del, async () => {
+          const { error } = await sb.from("posts").delete().eq("id", id);
+          if (error) throw error;
+          toast("削除しました");
+          go(`#/project/${post.project.id}`);
+        });
+      });
+      actions.append(del);
+    }
+
+    // タブ（プレビュー / HTML / CSS / JS）
+    const panels = {
+      preview: previewFrame(compose(post, false)),
+      html: h("pre", { class: "codeview" }, post.html || "（なし）"),
+      css: h("pre", { class: "codeview" }, post.css || "（なし）"),
+      js: h("pre", { class: "codeview" }, post.js || "（なし）")
+    };
+    const labels = { preview: "プレビュー", html: "HTML", css: "CSS", js: "JavaScript" };
+    const tabs = h("div", { class: "tabs" });
+    const body = h("div", {});
+    function show(key) {
+      [...tabs.children].forEach(t => t.classList.toggle("active", t.dataset.key === key));
+      body.replaceChildren(panels[key]);
+    }
+    Object.keys(labels).forEach(k => {
+      const t = h("button", { class: "tab", type: "button", "data-key": k }, labels[k]);
+      t.addEventListener("click", () => show(k));
+      tabs.append(t);
+    });
+    show("preview");
+
+    return h("section", {},
+      h("p", {}, h("a", { href: `#/project/${post.project.id}` }, "← " + post.project.title)),
+      h("div", { class: "card" },
+        h("div", { class: "page-head" },
+          h("div", {},
+            h("h1", {}, post.title),
+            h("div", { class: "meta" }, h("span", {}, "@" + (post.author ? post.author.username : "?")), h("span", {}, fmtDate(post.created_at)))),
+          actions),
+        h("p", { class: "notice" }, "投稿者が書いたコードです。プレビューは隔離された領域で実行されています。ダウンロードしたコードは、内容を確認してから実行してください。"),
+        tabs, body));
+  }
+
+  /* 起動時は onAuthStateChange(INITIAL_SESSION) が最初の描画を行う */
+})();
