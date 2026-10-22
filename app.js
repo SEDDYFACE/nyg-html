@@ -398,7 +398,7 @@
       const q = search.value.trim().toLowerCase();
       const items = data.filter(p => !q || (p.title + " " + p.description).toLowerCase().includes(q));
       list.replaceChildren();
-      if (!items.length) list.append(h("p", { class: "muted" }, data.length ? "該当する企画がありません。" : "まだ企画がありません。最初の企画を作ってみましょう！"));
+      if (!items.length) list.append(h("p", { class: "muted empty" }, data.length ? "該当する企画がありません。" : "まだ企画がありません。最初の企画を作ってみましょう！"));
       items.forEach(p => list.append(projectCard(p)));
     }
     search.addEventListener("input", draw);
@@ -555,6 +555,67 @@
       previewBox.replaceChildren(previewFrame(compose({ title: title.value, html: html.value, css: css.value, js: js.value }, false)));
     });
 
+    /* ---- 入力方法の切り替え（コード入力 / ファイル添付） ---- */
+    const codeFields = h("div", {},
+      field("HTML", html, "<body> の中身でも、<html> から始まる完全なHTMLでもOK。CSS や JavaScript をこの中（<style> / <script>）に直接書く場合は、下の欄は空のままで大丈夫です。"),
+      field("CSS（任意）", css, "HTMLの中に <style> で書いた場合は空のままでOK"),
+      field("JavaScript（任意）", js, "HTMLの中に <script> で書いた場合は空のままでOK"));
+
+    const fileInput = h("input", { type: "file", accept: ".html,.htm,.css,.js", multiple: true });
+    const fileInfo = h("ul", { class: "file-list" });
+    const fileBox = h("div", { class: "hidden" },
+      field("ファイルを選択", fileInput,
+        ".html（.htm）・.css・.js のファイルを選べます（複数選択可、各種類1つずつ、各200KBまで）。HTMLだけでもOKです。選んだ内容は「コード入力」に切り替えて確認・修正できます。"),
+      fileInfo);
+
+    function showFileInfo(items, errors) {
+      fileInfo.replaceChildren();
+      items.forEach(t => fileInfo.append(h("li", { class: "ok" }, "✓ " + t)));
+      errors.forEach(t => fileInfo.append(h("li", { class: "ng" }, "× " + t)));
+    }
+
+    fileInput.addEventListener("change", async () => {
+      const files = [...fileInput.files];
+      if (!files.length) { showFileInfo([], []); return; }
+      const found = {};
+      const okList = [];
+      const errs = [];
+      for (const f of files) {
+        const ext = (f.name.split(".").pop() || "").toLowerCase();
+        const kind = ext === "html" || ext === "htm" ? "html" : ext === "css" ? "css" : ext === "js" ? "js" : null;
+        if (!kind) { errs.push(`${f.name}：対応していない形式です（.html / .css / .js のみ）`); continue; }
+        if (found[kind]) { errs.push(`${f.name}：${kind.toUpperCase()} は1つだけ選べます`); continue; }
+        if (f.size > MAX_CODE * 4) { errs.push(`${f.name}：大きすぎます`); continue; }
+        const text = await f.text();
+        if (text.length > MAX_CODE) { errs.push(`${f.name}：大きすぎます（${MAX_CODE.toLocaleString()}文字まで）`); continue; }
+        if (text.includes("\u0000")) { errs.push(`${f.name}：テキストファイルではありません`); continue; }
+        found[kind] = text;
+        okList.push(`${f.name}（${kind.toUpperCase()}）`);
+      }
+      if (okList.length) {
+        html.value = found.html || "";
+        css.value = found.css || "";
+        js.value = found.js || "";
+        if (!title.value.trim()) {
+          const first = files.find(f => /\.(html?|css|js)$/i.test(f.name));
+          if (first) title.value = first.name.replace(/\.[^.]+$/, "").slice(0, 80);
+        }
+      }
+      showFileInfo(okList, errs);
+    });
+
+    function setMode(mode) {
+      const isFile = mode === "file";
+      codeFields.classList.toggle("hidden", isFile);
+      fileBox.classList.toggle("hidden", !isFile);
+      modeCode.classList.toggle("active", !isFile);
+      modeFile.classList.toggle("active", isFile);
+    }
+    const modeCode = h("button", { class: "tab", type: "button", onclick: () => setMode("code") }, "コード入力");
+    const modeFile = h("button", { class: "tab", type: "button", onclick: () => setMode("file") }, "ファイル添付");
+    const modeTabs = h("div", { class: "tabs" }, modeCode, modeFile);
+    setMode("code");
+
     const btn = h("button", { class: "btn primary", type: "submit" }, editing ? "保存" : "投稿する");
     const back = editing ? `#/post/${post.id}` : `#/project/${project.id}`;
     const form = h("form", { class: "card" },
@@ -562,9 +623,7 @@
       h("p", { class: "muted" }, "企画：" + project.title),
       h("p", { class: "notice" }, "投稿できるのは HTML / CSS / JavaScript のコードだけです（各200KBまで）。投稿したコードは誰でも閲覧・ダウンロードできます。"),
       field("タイトル", title),
-      field("HTML", html, "<body> の中身を書いてください（<html> から始まる完全なHTMLでもOK）"),
-      field("CSS", css),
-      field("JavaScript", js),
+      modeTabs, codeFields, fileBox,
       h("div", { class: "actions" }, btn, prevBtn, h("a", { class: "btn", href: back }, "キャンセル")),
       previewBox);
 
