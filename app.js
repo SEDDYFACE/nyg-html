@@ -46,6 +46,10 @@
     if (/rate limit|too many/i.test(m)) return "短時間に操作が多すぎます。しばらくしてからやり直してください。";
     if (/row-level security/i.test(m)) return "この操作を行う権限がありません。";
     if (/duplicate key/i.test(m)) return "既に使われています。";
+    if (/file too large/i.test(m)) return "500KBを超えるコードは、管理者の承認が必要です（残り回数がありません）。";
+    if (/already pending/i.test(m)) return "すでに要請を送信済みです。管理者の承認をお待ちください。";
+    if (/already decided/i.test(m)) return "この要請は、すでに回答済みです。";
+    if (/admin only/i.test(m)) return "管理者だけが行える操作です。";
     return m;
   }
 
@@ -78,7 +82,9 @@
     auth: { flowType: "pkce" }
   });
   const BASE_URL = location.origin + location.pathname;
-  const MAX_CODE = 500000;
+  const NORMAL_MAX = 500000;    // 一般ユーザーの上限（文字数）
+  const BIG_MAX = 2000000;      // 管理者・承認済みユーザーの上限（文字数）
+  let bigQuota = 0;             // 承認された大容量投稿の残り回数
 
   let session = null;
   let profile = null;
@@ -95,6 +101,14 @@
     // 管理者かどうかの確認（画面の出し分け用。実際の権限はデータベース側で強制される）
     const { data: adm } = await sb.rpc("is_admin");
     isAdmin = adm === true;
+    await refreshQuota();
+  }
+
+  async function refreshQuota() {
+    bigQuota = 0;
+    if (!session) return;
+    const { data } = await sb.from("upload_quota").select("remaining").eq("user_id", session.user.id).maybeSingle();
+    bigQuota = data ? data.remaining : 0;
   }
 
   sb.auth.onAuthStateChange((event, s) => {
@@ -145,15 +159,19 @@
   async function loadNotifs() {
     if (!session) { notifs = []; bellOpen = false; renderBell(); return; }
     const { data, error } = await sb.from("notifications")
-      .select("id,type,created_at,read_at,project_id,comment_id,actor:profiles!actor_id(username),project:projects(title),comment:comments(body)")
+      .select("id,type,created_at,read_at,project_id,comment_id,request_id,actor:profiles!actor_id(username),project:projects(title),comment:comments(body),request:big_upload_requests(status,granted,note)")
       .order("created_at", { ascending: false }).limit(30);
     if (error) console.error(error);
     notifs = error ? [] : data;
+    if (notifs.some(n => n.type === "upload_approved" && !n.read_at)) await refreshQuota();
     renderBell();
   }
 
   function notifText(n) {
     const who = "@" + (n.actor ? n.actor.username : "?");
+    if (n.type === "upload_request") return `${who} さんが大容量投稿（500KB超・最大2MB）を要請しています`;
+    if (n.type === "upload_approved") return `大容量投稿が承認されました（最大2MBを${n.request ? n.request.granted : "?"}回まで）`;
+    if (n.type === "upload_rejected") return "大容量投稿の要請は承認されませんでした";
     return n.type === "reply"
       ? `${who} さんがあなたのコメントに返信しました`
       : `${who} さんがあなたの企画「${n.project ? n.project.title : ""}」にコメントしました`;
@@ -180,6 +198,7 @@
     panel.append(head);
     if (!notifs.length) panel.append(h("p", { class: "muted bell-empty" }, "通知はまだありません。"));
     notifs.forEach(n => {
+      if (n.type === "upload_request") { panel.append(requestItem(n)); return; }
       const item = h("button", { class: "bell-item" + (n.read_at ? "" : " unread"), type: "button" },
         h("div", { class: "t" }, notifText(n)),
         n.comment ? h("div", { class: "ex" }, n.comment.body) : null,
@@ -188,6 +207,42 @@
       panel.append(item);
     });
     bellEl.append(panel);
+  }
+
+  function markRead(n) {
+    if (n.read_at) return;
+    n.read_at = new Date().toISOString();
+    sb.from("notifications").update({ read_at: n.read_at }).eq("id", n.id).then(r => { if (r.error) console.error(r.error); });
+  }
+
+  // 管理者向け：大容量投稿の要請（承認する回数を決める / 却下する）
+  function requestItem(n) {
+    const r = n.request;
+    const box = h("div", { class: "bell-item req" + (n.read_at ? "" : " unread") },
+      h("div", { class: "t" }, notifText(n)),
+      r && r.note ? h("div", { class: "ex" }, "理由：" + r.note) : null,
+      h("div", { class: "d" }, fmtDate(n.created_at)));
+    if (!r) return box;
+    if (r.status === "pending") {
+      const count = h("input", { type: "number", min: 1, max: 100, value: 1, "aria-label": "認める回数" });
+      const ok = h("button", { class: "btn small primary", type: "button" }, "承認");
+      const no = h("button", { class: "btn small danger", type: "button" }, "却下");
+      const decide = (approve, btn) => busy(btn, async () => {
+        const c = parseInt(count.value, 10);
+        if (approve && !(c >= 1 && c <= 100)) throw new Error("回数は1〜100で入力してください。");
+        const { error } = await sb.rpc("decide_big_upload", { p_request: n.request_id, p_count: approve ? c : 0, p_approve: approve });
+        if (error) throw error;
+        markRead(n);
+        toast(approve ? `${c}回分を承認しました` : "却下しました");
+        await loadNotifs();
+      });
+      ok.addEventListener("click", () => decide(true, ok));
+      no.addEventListener("click", () => decide(false, no));
+      box.append(h("div", { class: "bell-req-actions" }, count, "回まで", ok, no));
+    } else {
+      box.append(h("div", { class: "ex" }, r.status === "approved" ? `✓ 承認済み（${r.granted}回）` : "× 却下済み"));
+    }
+    return box;
   }
 
   async function markAllRead() {
@@ -199,11 +254,10 @@
   }
 
   function openNotif(n) {
+    markRead(n);
+    // 大容量投稿の承認・却下の通知は、既読にするだけ（移動しない）
+    if (!n.project_id) { renderBell(); return; }
     bellOpen = false;
-    if (!n.read_at) {
-      n.read_at = new Date().toISOString();
-      sb.from("notifications").update({ read_at: n.read_at }).eq("id", n.id).then(r => { if (r.error) console.error(r.error); });
-    }
     renderBell();
     const target = `#/project/${n.project_id}`;
     pendingScroll = n.comment_id;
@@ -761,6 +815,34 @@
       placeholder: "例：v2 ボタンの色を変更。スマホ表示を修正。使い方は〜"
     });
 
+    // このフォームで使える上限（管理者・承認済み・すでに大容量の投稿の編集は 2MB まで）
+    const wasBig = editing && Math.max((post.html || "").length, (post.css || "").length, (post.js || "").length) > NORMAL_MAX;
+    const cap = () => (isAdmin || bigQuota > 0 || wasBig) ? BIG_MAX : NORMAL_MAX;
+    const kb = n => Math.round(n / 1000).toLocaleString() + "KB";
+
+    // 500KB を超えたときに出す「管理者への要請」欄
+    const bigBox = h("div", { class: "notice hidden" });
+    async function showBigNotice() {
+      bigBox.classList.remove("hidden");
+      bigBox.replaceChildren(h("p", { style: "margin:0" }, "確認中…"));
+      const { data } = await sb.from("big_upload_requests").select("id").eq("user_id", session.user.id).eq("status", "pending").maybeSingle();
+      if (data) {
+        bigBox.replaceChildren(h("p", { style: "margin:0" }, "📨 大容量投稿の要請を送信済みです。管理者の承認をお待ちください（承認されるとベルに通知が届きます）。"));
+        return;
+      }
+      const note = h("textarea", { rows: 2, maxlength: 500, placeholder: "例：デモ用に約1.2MBのHTMLを投稿したいです。" });
+      const send = h("button", { class: "btn small primary", type: "button" }, "管理者に要請を送る");
+      send.addEventListener("click", () => busy(send, async () => {
+        const { error } = await sb.rpc("request_big_upload", { p_note: note.value.trim() });
+        if (error) throw error;
+        toast("管理者に要請を送りました");
+        showBigNotice();
+      }));
+      bigBox.replaceChildren(
+        h("p", { style: "margin:0 0 .4rem" }, "500KBを超えるコードを投稿するには、管理者の承認が必要です。承認されると、最大2MBのコードを、認められた回数だけ投稿できます。"),
+        note, h("div", { class: "actions", style: "margin-top:.4rem" }, send));
+    }
+
     const previewBox = h("div", { class: "preview-box hidden" });
     const prevBtn = h("button", { class: "btn", type: "button" }, "▶ プレビュー");
     prevBtn.addEventListener("click", () => {
@@ -793,14 +875,16 @@
       const found = {};
       const okList = [];
       const errs = [];
+      let needBig = false;
       for (const f of files) {
         const ext = (f.name.split(".").pop() || "").toLowerCase();
         const kind = ext === "html" || ext === "htm" ? "html" : ext === "css" ? "css" : ext === "js" ? "js" : null;
         if (!kind) { errs.push(`${f.name}：対応していない形式です（.html / .css / .js のみ）`); continue; }
         if (found[kind]) { errs.push(`${f.name}：${kind.toUpperCase()} は1つだけ選べます`); continue; }
-        if (f.size > MAX_CODE * 4) { errs.push(`${f.name}：大きすぎます`); continue; }
+        if (f.size > BIG_MAX * 4) { errs.push(`${f.name}：大きすぎます（最大2MBまで）`); continue; }
         const text = await f.text();
-        if (text.length > MAX_CODE) { errs.push(`${f.name}：大きすぎます（${MAX_CODE.toLocaleString()}文字まで）`); continue; }
+        if (text.length > BIG_MAX) { errs.push(`${f.name}：大きすぎます（最大2MBまで）`); continue; }
+        if (text.length > cap()) { errs.push(`${f.name}：500KBを超えています（管理者の承認が必要です）`); needBig = true; continue; }
         if (text.includes("\u0000")) { errs.push(`${f.name}：テキストファイルではありません`); continue; }
         found[kind] = text;
         okList.push(`${f.name}（${kind.toUpperCase()}）`);
@@ -816,6 +900,7 @@
         }
       }
       showFileInfo(okList, errs);
+      if (needBig && !isAdmin) showBigNotice();
     });
 
     function setMode(mode) {
@@ -835,10 +920,16 @@
     const form = h("form", { class: "card" },
       h("h1", {}, editing ? "投稿を編集" : "コードを投稿"),
       h("p", { class: "muted" }, "企画：" + project.title),
-      h("p", { class: "notice" }, "投稿できるのは HTML / CSS / JavaScript のコードだけです（各500KBまで）。投稿したコードは誰でも閲覧・ダウンロードできます。"),
+      h("p", { class: "notice" },
+        "投稿できるのは HTML / CSS / JavaScript のコードだけです。投稿したコードは誰でも閲覧・ダウンロードできます。",
+        h("br"),
+        isAdmin ? "管理者は、各最大2MBまで投稿できます。"
+          : bigQuota > 0 ? `各500KBまで。大容量投稿（各最大2MB）の残り回数：${bigQuota}回`
+          : "各500KBまで。超える場合は、管理者に要請できます（承認されると最大2MBまで）。"),
       field("タイトル", title),
       modeTabs, codeFields, fileBox,
       field("メモ（任意）", memo, "改善した点・変更点・使い方などを自由に書けます（2000文字まで）。投稿ページに表示されます。"),
+      bigBox,
       h("div", { class: "actions" }, btn, prevBtn, h("a", { class: "btn", href: back }, "キャンセル")),
       previewBox);
 
@@ -849,8 +940,15 @@
         if (!row.title) throw new Error("タイトルを入力してください。");
         if (!row.html.trim() && !row.css.trim() && !row.js.trim()) throw new Error("HTML / CSS / JavaScript のいずれかを入力してください。");
         for (const k of ["html", "css", "js"]) {
-          if (row[k].length > MAX_CODE) throw new Error(`${k.toUpperCase()} が大きすぎます（${MAX_CODE.toLocaleString()}文字まで）。`);
+          if (row[k].length > BIG_MAX) throw new Error(`${k.toUpperCase()} が大きすぎます（最大2MBまで）。`);
+          if (row[k].length > cap()) {
+            showBigNotice();
+            throw new Error(`${k.toUpperCase()} が500KBを超えています。管理者の承認が必要です（下の「要請」から申請できます）。`);
+          }
         }
+        // 承認済みの回数を使う投稿（すでに大容量の投稿の編集は消費しない）
+        const isBigNow = ["html", "css", "js"].some(k => row[k].length > NORMAL_MAX);
+        if (isBigNow && !isAdmin && !wasBig && !confirm(`500KBを超える投稿です。大容量投稿の残り回数（${bigQuota}回）を1回消費します。よろしいですか？`)) return;
         if (editing) {
           const { error } = await sb.from("posts").update({ ...row, updated_at: new Date().toISOString() }).eq("id", post.id);
           if (error) throw error;
@@ -861,6 +959,7 @@
             .insert({ ...row, project_id: project.id, author_id: session.user.id }).select("id").single();
           if (error) throw error;
           toast("投稿しました");
+          if (isBigNow && !isAdmin) await refreshQuota();
           go(`#/post/${data.id}`);
         }
       });
