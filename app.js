@@ -758,25 +758,75 @@
     if (canPost(project)) postAction = h("a", { class: "btn primary", href: `#/project/${id}/new` }, "＋ コードを投稿");
     else if (!session && project.allow_others_post) postAction = h("a", { class: "btn primary", href: "#/login" }, "ログインして投稿");
 
+    // 投稿一覧（まとめて削除モード付き）
+    // 削除できるのは、企画主・管理者はすべての投稿、それ以外の人は自分の投稿だけ
+    const canDel = p => !!session && (isOwner || p.author_id === session.user.id);
+    const deletable = posts.filter(canDel);
+    let selecting = false;
+    const selected = new Set();
     const list = h("div", {});
-    if (!posts.length) list.append(h("p", { class: "muted" }, "まだ投稿がありません。"));
-    posts.forEach(p => {
-      // 投稿のコードを取得して、HTML1ファイルとしてそのままダウンロード
-      const dlBtn = h("button", { class: "btn small", type: "button" }, "⬇ htmlとしてダウンロード");
-      dlBtn.addEventListener("click", () => busy(dlBtn, async () => {
-        const { data, error } = await sb.from("posts").select("*").eq("id", p.id).maybeSingle();
-        if (error) throw error;
-        if (!data) throw new Error("投稿が見つかりません。");
-        downloadSingleHtml(data);
-      }));
-      list.append(h("div", { class: "card post-item" },
-        h("div", { class: "info" },
-          h("h3", {}, h("a", { href: `#/post/${p.id}` }, p.title)),
-          h("div", { class: "meta" }, h("span", {}, "@" + (p.author ? p.author.username : "?")), h("span", {}, fmtDate(p.created_at)))),
-        h("div", { class: "actions" },
-          h("a", { class: "btn small", href: `#/post/${p.id}` }, "開く"),
-          dlBtn)));
-    });
+    const bulkBar = h("div", { class: "card bulk-bar hidden" });
+    const bulkBtn = deletable.length
+      ? h("button", { class: "btn", type: "button", onclick: () => { selecting = !selecting; selected.clear(); draw(); } }, "🗑 まとめて削除")
+      : null;
+
+    function drawBulkBar() {
+      bulkBar.classList.toggle("hidden", !selecting);
+      bulkBar.replaceChildren();
+      if (!selecting) return;
+      const n = selected.size;
+      const allOn = n === deletable.length;
+      const toggleAll = h("button", { class: "btn small", type: "button" }, allOn ? "すべて解除" : "すべて選択");
+      toggleAll.addEventListener("click", () => {
+        selected.clear();
+        if (!allOn) deletable.forEach(p => selected.add(p.id));
+        draw();
+      });
+      const del = h("button", { class: "btn small danger", type: "button" }, `選択した${n}件を削除`);
+      del.disabled = n === 0;
+      del.addEventListener("click", () => {
+        if (!confirm(`選択した${n}件の投稿を削除します。元に戻せません。よろしいですか？`)) return;
+        busy(del, async () => {
+          const { data, error } = await sb.from("posts").delete().in("id", [...selected]).select("id");
+          if (error) throw error;
+          const done = data ? data.length : 0;
+          toast(done === n ? `${done}件を削除しました` : `${n}件中${done}件を削除しました（権限のない投稿は削除されません）`, done !== n);
+          route();
+        });
+      });
+      const cancel = h("button", { class: "btn small", type: "button", onclick: () => { selecting = false; selected.clear(); draw(); } }, "キャンセル");
+      bulkBar.append(h("span", { class: "muted" }, `${n}件選択中`), toggleAll, del, cancel);
+    }
+
+    function drawList() {
+      list.replaceChildren();
+      if (!posts.length) list.append(h("p", { class: "muted" }, "まだ投稿がありません。"));
+      posts.forEach(p => {
+        // 投稿のコードを取得して、HTML1ファイルとしてそのままダウンロード
+        const dlBtn = h("button", { class: "btn small", type: "button" }, "⬇ htmlとしてダウンロード");
+        dlBtn.addEventListener("click", () => busy(dlBtn, async () => {
+          const { data, error } = await sb.from("posts").select("*").eq("id", p.id).maybeSingle();
+          if (error) throw error;
+          if (!data) throw new Error("投稿が見つかりません。");
+          downloadSingleHtml(data);
+        }));
+        let pick = null;
+        if (selecting && canDel(p)) {
+          pick = h("input", { type: "checkbox", class: "pick", checked: selected.has(p.id), "aria-label": `「${p.title}」を選択` });
+          pick.addEventListener("change", () => { if (pick.checked) selected.add(p.id); else selected.delete(p.id); draw(); });
+        }
+        list.append(h("div", { class: "card post-item" + (pick && pick.checked ? " picked" : "") },
+          pick,
+          h("div", { class: "info" },
+            h("h3", {}, h("a", { href: `#/post/${p.id}` }, p.title)),
+            h("div", { class: "meta" }, h("span", {}, "@" + (p.author ? p.author.username : "?")), h("span", {}, fmtDate(p.created_at)))),
+          h("div", { class: "actions" },
+            h("a", { class: "btn small", href: `#/post/${p.id}` }, "開く"),
+            dlBtn)));
+      });
+    }
+    function draw() { drawBulkBar(); drawList(); }
+    draw();
 
     return h("section", {},
       h("div", { class: "card" },
@@ -786,7 +836,8 @@
             h("div", { class: "meta" }, openBadge(project), h("span", {}, "企画主 @" + (project.owner ? project.owner.username : "?")), h("span", {}, fmtDate(project.created_at)))),
           h("div", { class: "actions" }, zipBtn, isOwner ? h("a", { class: "btn", href: `#/project/${id}/edit` }, "⚙ 設定") : null)),
         project.description ? h("p", { style: "white-space:pre-wrap;margin:0" }, project.description) : null),
-      h("div", { class: "page-head" }, h("h2", {}, `投稿（${posts.length}）`), postAction),
+      h("div", { class: "page-head" }, h("h2", {}, `投稿（${posts.length}）`), h("div", { class: "actions" }, bulkBtn, postAction)),
+      bulkBar,
       list,
       commentsSection(project, commentsRes));
   }
