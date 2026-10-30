@@ -131,6 +131,13 @@ textarea.code {
 .bell-item .ex { font-size: .82rem; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
 .bell-item .d { font-size: .75rem; color: var(--muted); margin-top: .15rem; }
 
+/* ---------- bulk delete ---------- */
+.bulk-bar { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; position: sticky; top: 4rem; z-index: 5; padding: .6rem .9rem; background: #fff6f6; border-color: #f3c3c3; }
+.bulk-bar.hidden { display: none; }
+.post-item .info { flex: 1; }
+.post-item .pick { width: 1.2rem; height: 1.2rem; flex: none; cursor: pointer; }
+.post-item.picked { border-color: var(--danger); background: #fffafa; }
+
 /* ---------- big upload request ---------- */
 .bell-item.req { cursor: default; }
 .bell-item.req:hover { background: inherit; }
