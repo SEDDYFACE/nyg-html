@@ -131,6 +131,35 @@ textarea.code {
 .bell-item .ex { font-size: .82rem; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
 .bell-item .d { font-size: .75rem; color: var(--muted); margin-top: .15rem; }
 
+/* ---------- visibility / collaborators / picker ---------- */
+.badge.lock { background: #fff1d6; color: #8a5a00; }
+.limited-box.hidden { display: none; }
+.limited-box { background: #fffaf0; }
+.picker input[type=search] { margin-bottom: .4rem; }
+.picker-row { display: flex; align-items: center; justify-content: space-between; gap: .5rem; padding: .35rem .2rem; border-bottom: 1px solid var(--line); }
+.picker-row:last-child { border-bottom: none; }
+.picker-results { max-height: 14rem; overflow-y: auto; }
+.lock-box { text-align: center; padding: 2rem 1rem; margin-top: 1rem; background: #fafbfc; border: 1px dashed var(--line); border-radius: var(--radius); }
+.lock-box .lock-icon { font-size: 2.6rem; line-height: 1; margin-bottom: .4rem; }
+.lock-box p { max-width: 34rem; margin-left: auto; margin-right: auto; }
+
+/* ---------- admin / mail notice / notification rows ---------- */
+.table-wrap { overflow-x: auto; padding: 0; }
+.table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+.table th, .table td { padding: .6rem .8rem; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.table th { background: #f6f7f9; font-size: .8rem; color: var(--muted); }
+.table td.mail { font-family: var(--mono); font-size: .82rem; }
+.mail-steps ol { margin: .4rem 0 0; padding-left: 1.3rem; }
+.mail-steps { margin-bottom: 1rem; }
+.mail-tips { color: var(--muted); font-size: .85rem; padding-left: 1.2rem; }
+.hint-mail { color: var(--muted); font-size: .82rem; text-align: center; margin: .8rem 0 0; }
+.bell-tools { display: flex; gap: .3rem; }
+.bell-row { position: relative; border-bottom: 1px solid var(--line); }
+.bell-row .bell-item { border-bottom: none; padding-right: 2.2rem; }
+.bell-x { position: absolute; top: .35rem; right: .45rem; width: 1.5rem; height: 1.5rem; border: none; border-radius: 50%; background: transparent; color: var(--muted); font-size: 1.1rem; line-height: 1; cursor: pointer; }
+.bell-x:hover { background: #fdecec; color: var(--danger); }
+.bell-foot { margin: 0; padding: .5rem .8rem; font-size: .75rem; text-align: center; }
+
 /* ---------- bulk delete ---------- */
 .bulk-bar { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; position: sticky; top: 4rem; z-index: 5; padding: .6rem .9rem; background: #fff6f6; border-color: #f3c3c3; }
 .bulk-bar.hidden { display: none; }
