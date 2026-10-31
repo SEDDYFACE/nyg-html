@@ -694,7 +694,7 @@
 
   async function viewHome() {
     const { data, error } = await sb.from("projects")
-      .select("id,title,description,allow_others_post,created_at,owner:profiles(username),posts(count)")
+      .select("id,title,description,allow_others_post,created_at,owner:profiles!owner_id(username),posts(count)")
       .order("created_at", { ascending: false });
     if (error) throw error;
 
@@ -778,11 +778,11 @@
   }
 
   async function fetchProject(id) {
-    const { data, error } = await sb.from("projects").select("*, owner:profiles(username)").eq("id", id).maybeSingle();
+    const { data, error } = await sb.from("projects").select("*, owner:profiles!owner_id(username)").eq("id", id).maybeSingle();
     if (error) throw error;
     if (!data) return data;
     // 共同編集者（企画主・管理者のほかに、設定変更と投稿ができる人）
-    const { data: collabs } = await sb.from("project_collaborators").select("user_id,user:profiles(username)").eq("project_id", id).order("created_at");
+    const { data: collabs } = await sb.from("project_collaborators").select("user_id,user:profiles!user_id(username)").eq("project_id", id).order("created_at");
     data.collaborators = collabs || [];
     data.isCollab = !!session && data.collaborators.some(c => c.user_id === session.user.id);
     return data;
@@ -979,9 +979,9 @@
   async function viewProject(id) {
     const [project, postsRes, commentsRes, myViewRes] = await Promise.all([
       fetchProject(id),
-      sb.from("posts").select("id,title,created_at,author_id,is_public,author:profiles(username)")
+      sb.from("posts").select("id,title,created_at,author_id,is_public,author:profiles!author_id(username)")
         .eq("project_id", id).order("created_at", { ascending: false }),
-      sb.from("comments").select("id,body,created_at,author_id,parent_id,author:profiles(username)")
+      sb.from("comments").select("id,body,created_at,author_id,parent_id,author:profiles!author_id(username)")
         .eq("project_id", id).order("created_at", { ascending: true }),
       // 自分が閲覧を許可されている限定公開の投稿
       session ? sb.from("post_viewers").select("post_id").eq("user_id", session.user.id) : Promise.resolve({ data: [] })
@@ -1153,7 +1153,7 @@
     isPublic.addEventListener("change", syncVisibility);
     // 編集のときは、いまの閲覧者を読み込む
     const viewersReady = editing
-      ? sb.from("post_viewers").select("user_id,user:profiles(username)").eq("post_id", post.id).then(r => {
+      ? sb.from("post_viewers").select("user_id,user:profiles!user_id(username)").eq("post_id", post.id).then(r => {
           (r.data || []).forEach(v => { const n = v.user ? v.user.username : "?"; origViewers.set(v.user_id, n); if (!viewers.has(v.user_id)) viewers.set(v.user_id, n); });
           drawViewers();
         })
