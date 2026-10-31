@@ -682,7 +682,7 @@
   }
 
   function projectCard(p) {
-    const count = p.posts && p.posts[0] ? p.posts[0].count : 0;
+    const count = p.postCount || 0;
     return h("a", { class: "card project-card", href: `#/project/${p.id}` },
       h("h3", {}, p.title),
       p.description ? h("p", { class: "desc" }, p.description) : null,
@@ -694,9 +694,18 @@
 
   async function viewHome() {
     const { data, error } = await sb.from("projects")
-      .select("id,title,description,allow_others_post,created_at,owner:profiles!owner_id(username),posts(count)")
+      .select("id,title,description,allow_others_post,created_at,owner:profiles!owner_id(username)")
       .order("created_at", { ascending: false });
     if (error) throw error;
+    // 投稿数は、投稿の project_id だけを取得して数える（1000件ずつ）
+    const counts = {};
+    for (let from = 0; from < 100000; from += 1000) {
+      const r = await sb.from("posts").select("project_id").order("id").range(from, from + 999);
+      if (r.error) break;
+      (r.data || []).forEach(x => { counts[x.project_id] = (counts[x.project_id] || 0) + 1; });
+      if (!r.data || r.data.length < 1000) break;
+    }
+    data.forEach(p => { p.postCount = counts[p.id] || 0; });
 
     const search = h("input", { type: "search", class: "search", placeholder: "企画を検索…" });
     const list = h("div", { class: "grid" });
