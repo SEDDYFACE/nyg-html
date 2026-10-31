@@ -1031,9 +1031,9 @@
       del.addEventListener("click", () => {
         if (!confirm(`選択した${n}件の投稿を削除します。元に戻せません。よろしいですか？`)) return;
         busy(del, async () => {
-          const { data, error } = await sb.from("posts").delete().in("id", [...selected]).select("id");
+          const { count, error } = await sb.from("posts").delete({ count: "exact" }).in("id", [...selected]);
           if (error) throw error;
-          const done = data ? data.length : 0;
+          const done = count || 0;
           toast(done === n ? `${done}件を削除しました` : `${n}件中${done}件を削除しました（権限のない投稿は削除されません）`, done !== n);
           route();
         });
@@ -1322,13 +1322,14 @@
           toast("保存しました");
           go(`#/post/${post.id}`);
         } else {
-          const { data, error } = await sb.from("posts")
-            .insert({ ...row, project_id: project.id, author_id: session.user.id }).select("id").single();
+          const newId = (crypto.randomUUID ? crypto.randomUUID() : "10000000-1000-4000-8000-" + String(Date.now()).padStart(12, "0").slice(-12));
+          const { error } = await sb.from("posts")
+            .insert({ ...row, id: newId, project_id: project.id, author_id: session.user.id });
           if (error) throw error;
           if (isBigNow && !isAdmin) await refreshQuota();
-          await syncViewers(data.id);
+          await syncViewers(newId);
           toast("投稿しました");
-          go(`#/post/${data.id}`);
+          go(`#/post/${newId}`);
         }
       });
     });
