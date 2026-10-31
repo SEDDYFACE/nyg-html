@@ -50,6 +50,10 @@
     if (/already pending/i.test(m)) return "すでに要請を送信済みです。管理者の承認をお待ちください。";
     if (/already decided/i.test(m)) return "この要請は、すでに回答済みです。";
     if (/admin only/i.test(m)) return "管理者だけが行える操作です。";
+    if (/already requested/i.test(m)) return "すでに公開を要請済みです。作成者の対応をお待ちください。";
+    if (/already public/i.test(m)) return "この投稿は、すでに閲覧できる状態です。";
+    if (/cannot delete yourself/i.test(m)) return "自分自身のアカウントは削除できません。";
+    if (/cannot delete admin/i.test(m)) return "管理者アカウントは削除できません。";
     return m;
   }
 
@@ -135,13 +139,15 @@
   function renderNav() {
     navEl.replaceChildren();
     if (session) {
-      navEl.append(
+      // append(null) は「null」という文字が入ってしまうので、使わない要素は配列から除く
+      navEl.append(...[
         h("span", { class: "who" }, profile ? `@${profile.username}` : "", isAdmin ? h("span", { class: "badge open", style: "margin-left:.4rem" }, "管理者") : null),
+        isAdmin ? h("a", { class: "btn small", href: "#/admin" }, "👤 ユーザー管理") : null,
         h("a", { class: "btn small primary", href: "#/new-project" }, "＋ 企画を作る"),
         h("button", {
           class: "btn small", type: "button",
           onclick: async () => { await sb.auth.signOut(); toast("ログアウトしました"); go("#/"); }
-        }, "ログアウト"));
+        }, "ログアウト")].filter(Boolean));
     } else {
       navEl.append(
         h("a", { class: "btn small", href: "#/login" }, "ログイン"),
@@ -159,7 +165,7 @@
   async function loadNotifs() {
     if (!session) { notifs = []; bellOpen = false; renderBell(); return; }
     const { data, error } = await sb.from("notifications")
-      .select("id,type,created_at,read_at,project_id,comment_id,request_id,actor:profiles!actor_id(username),project:projects(title),comment:comments(body),request:big_upload_requests(status,granted,note)")
+      .select("id,type,created_at,read_at,project_id,comment_id,request_id,post_id,actor_id,actor:profiles!actor_id(username),project:projects(title),post:posts(title),comment:comments(body),request:big_upload_requests(status,granted,note)")
       .order("created_at", { ascending: false }).limit(30);
     if (error) console.error(error);
     notifs = error ? [] : data;
@@ -172,6 +178,7 @@
     if (n.type === "upload_request") return `${who} さんが大容量投稿（500KB超・最大2MB）を要請しています`;
     if (n.type === "upload_approved") return `大容量投稿が承認されました（最大2MBを${n.request ? n.request.granted : "?"}回まで）`;
     if (n.type === "upload_rejected") return "大容量投稿の要請は承認されませんでした";
+    if (n.type === "publish_request") return `${who} さんが、あなたの投稿「${n.post ? n.post.title : ""}」の公開を要請しています`;
     return n.type === "reply"
       ? `${who} さんがあなたのコメントに返信しました`
       : `${who} さんがあなたの企画「${n.project ? n.project.title : ""}」にコメントしました`;
@@ -190,23 +197,86 @@
     const panel = h("div", { class: "bell-panel" });
     panel.addEventListener("click", e => e.stopPropagation());
     const head = h("div", { class: "bell-head" }, h("strong", {}, "通知"));
+    const tools = h("div", { class: "bell-tools" });
     if (unread) {
-      const all = h("button", { class: "btn small", type: "button" }, "すべて既読にする");
+      const all = h("button", { class: "btn small", type: "button" }, "すべて既読");
       all.addEventListener("click", () => busy(all, markAllRead));
-      head.append(all);
+      tools.append(all);
     }
+    if (notifs.some(deletable)) {
+      const del = h("button", { class: "btn small danger", type: "button" }, "すべて削除");
+      del.addEventListener("click", () => {
+        if (!confirm("通知をすべて削除します。よろしいですか？（回答待ちの大容量投稿の要請は残ります）")) return;
+        busy(del, deleteAllNotifs);
+      });
+      tools.append(del);
+    }
+    head.append(tools);
     panel.append(head);
     if (!notifs.length) panel.append(h("p", { class: "muted bell-empty" }, "通知はまだありません。"));
     notifs.forEach(n => {
-      if (n.type === "upload_request") { panel.append(requestItem(n)); return; }
-      const item = h("button", { class: "bell-item" + (n.read_at ? "" : " unread"), type: "button" },
-        h("div", { class: "t" }, notifText(n)),
-        n.comment ? h("div", { class: "ex" }, n.comment.body) : null,
-        h("div", { class: "d" }, fmtDate(n.created_at)));
-      item.addEventListener("click", () => openNotif(n));
-      panel.append(item);
+      let content;
+      if (n.type === "upload_request") content = requestItem(n);
+      else if (n.type === "publish_request") content = publishItem(n);
+      else {
+        content = h("button", { class: "bell-item" + (n.read_at ? "" : " unread"), type: "button" },
+          h("div", { class: "t" }, notifText(n)),
+          n.comment ? h("div", { class: "ex" }, n.comment.body) : null,
+          h("div", { class: "d" }, fmtDate(n.created_at)));
+        content.addEventListener("click", () => openNotif(n));
+      }
+      const row = h("div", { class: "bell-row" }, content);
+      if (deletable(n)) {
+        const x = h("button", { class: "bell-x", type: "button", title: "この通知を削除", "aria-label": "この通知を削除" }, "×");
+        x.addEventListener("click", () => busy(x, () => deleteNotif(n)));
+        row.append(x);
+      }
+      panel.append(row);
     });
+    panel.append(h("p", { class: "muted bell-foot" }, "通知は1週間で自動的に削除されます。"));
     bellEl.append(panel);
+  }
+
+  // 回答待ちの大容量投稿の要請は、回答するまで削除できない
+  function deletable(n) {
+    return !(n.type === "upload_request" && n.request && n.request.status === "pending");
+  }
+
+  async function deleteNotif(n) {
+    const { error } = await sb.from("notifications").delete().eq("id", n.id);
+    if (error) throw error;
+    notifs = notifs.filter(x => x.id !== n.id);
+    renderBell();
+  }
+
+  async function deleteAllNotifs() {
+    const ids = notifs.filter(deletable).map(n => n.id);
+    if (!ids.length) return;
+    const { error } = await sb.from("notifications").delete().in("id", ids);
+    if (error) throw error;
+    notifs = notifs.filter(n => !ids.includes(n.id));
+    renderBell();
+    toast("通知を削除しました");
+  }
+
+  // 投稿者向け：「公開を要請」された通知（要請した人に閲覧を許可する / 投稿を開く）
+  function publishItem(n) {
+    const who = n.actor ? n.actor.username : "?";
+    const box = h("div", { class: "bell-item req" + (n.read_at ? "" : " unread") },
+      h("div", { class: "t" }, notifText(n)),
+      h("div", { class: "d" }, fmtDate(n.created_at)));
+    const allow = h("button", { class: "btn small primary", type: "button" }, `@${who} に閲覧を許可`);
+    allow.addEventListener("click", () => busy(allow, async () => {
+      const { error } = await sb.from("post_viewers").insert({ post_id: n.post_id, user_id: n.actor_id });
+      if (error && !/duplicate key/i.test(error.message)) throw error;
+      markRead(n);
+      toast(`@${who} に閲覧を許可しました`);
+      renderBell();
+    }));
+    const open = h("button", { class: "btn small", type: "button" }, "投稿を開く");
+    open.addEventListener("click", () => { markRead(n); bellOpen = false; renderBell(); go(`#/post/${n.post_id}`); });
+    box.append(h("div", { class: "bell-req-actions" }, allow, open));
+    return box;
   }
 
   function markRead(n) {
@@ -338,10 +408,11 @@
     download(safeName(p.title) + ".zip", await zip.generateAsync({ type: "blob" }));
   }
 
-  async function downloadProjectZip(project) {
-    const { data, error } = await sb.from("posts").select("*").eq("project_id", project.id).order("created_at", { ascending: true });
+  async function downloadProjectZip(project, total) {
+    // 見る権限のある投稿だけがコード付きで返ってくる（限定公開で見られない投稿は含まれない）
+    const { data, error } = await sb.rpc("get_project_posts", { p_project: project.id });
     if (error) throw error;
-    if (!data.length) { toast("まだ投稿がありません", true); return; }
+    if (!data.length) { toast(total ? "ダウンロードできる投稿がありません（限定公開のため）" : "まだ投稿がありません", true); return; }
     const zip = new JSZip();
     data.forEach((p, i) => {
       const dir = zip.folder(String(i + 1).padStart(2, "0") + "_" + safeName(p.title));
@@ -351,6 +422,7 @@
       if (p.memo) dir.file("memo.txt", p.memo);
     });
     download(safeName(project.title) + ".zip", await zip.generateAsync({ type: "blob" }));
+    if (total && data.length < total) toast(`限定公開の${total - data.length}件は、閲覧できないため含まれていません`);
   }
 
   /* ======================================================
@@ -368,6 +440,7 @@
       else if (a === "signup") view = viewSignup();
       else if (a === "forgot") view = viewForgot();
       else if (a === "reset") view = viewReset();
+      else if (a === "admin") view = await viewAdmin();
       else if (a === "new-project") view = viewProjectForm(null);
       else if (a === "project" && b && c === "edit") view = await viewProjectEdit(b);
       else if (a === "project" && b && c === "new") view = await viewPostNew(b);
@@ -400,6 +473,7 @@
     const form = h("form", { class: "card narrow" },
       h("h1", {}, "ログイン"),
       field("ユーザー名", u), field("パスワード", p), btn,
+      h("p", { class: "hint-mail" }, "📧 新規登録のあとは、確認メールのリンクを開くまでログインできません。"),
       h("p", { class: "links" }, h("a", { href: "#/forgot" }, "パスワードを忘れた方"), " ・ ", h("a", { href: "#/signup" }, "新規登録")));
     form.addEventListener("submit", e => {
       e.preventDefault();
@@ -422,10 +496,16 @@
     const u = h("input", { type: "text", autocomplete: "username", required: true, maxlength: 20, pattern: "[A-Za-z0-9_]{3,20}" });
     const p1 = h("input", { type: "password", autocomplete: "new-password", required: true, minlength: 8 });
     const p2 = h("input", { type: "password", autocomplete: "new-password", required: true, minlength: 8 });
-    const btn = h("button", { class: "btn primary", type: "submit" }, "登録する");
+    const btn = h("button", { class: "btn primary", type: "submit" }, "登録して確認メールを受け取る");
     const form = h("form", { class: "card narrow" },
       h("h1", {}, "新規登録"),
-      field("メールアドレス", email, "パスワードを忘れたときの再設定用です（他の人には表示されません）"),
+      h("div", { class: "notice mail-steps" },
+        h("strong", {}, "📧 メールアドレスの認証が必要です"),
+        h("ol", {},
+          h("li", {}, "下の項目を入力して、「登録して確認メールを受け取る」を押す"),
+          h("li", {}, "届いた確認メールの中のリンクを開く（開くまでログインできません）"),
+          h("li", {}, "ユーザー名とパスワードでログインする"))),
+      field("メールアドレス（確認メールが届きます）", email, "実際に受け取れるアドレスを入力してください。パスワードを忘れたときの再設定にも使います（他の人には表示されません）"),
       field("ユーザー名", u, "半角英数字とアンダースコア、3〜20文字。ログイン時に使います"),
       field("パスワード", p1, "8文字以上"),
       field("パスワード（確認）", p2),
@@ -454,10 +534,24 @@
           toast("登録しました");
           go("#/");
         } else {
+          const sentTo = email.value.trim();
+          const resend = h("button", { class: "btn small", type: "button" }, "確認メールを再送する");
+          resend.addEventListener("click", () => busy(resend, async () => {
+            const { error: e2 } = await sb.auth.resend({ type: "signup", email: sentTo, options: { emailRedirectTo: BASE_URL } });
+            if (e2) throw e2;
+            toast("確認メールを再送しました");
+          }));
           app.replaceChildren(h("div", { class: "card narrow" },
-            h("h1", {}, "確認メールを送信しました"),
-            h("p", {}, "メール内のリンクを開いて登録を完了してください。完了後、ユーザー名とパスワードでログインできます。"),
-            h("p", { class: "links" }, h("a", { href: "#/login" }, "ログイン画面へ"))));
+            h("h1", {}, "📧 確認メールを送信しました"),
+            h("p", {}, "送信先：", h("strong", {}, sentTo)),
+            h("div", { class: "notice" }, h("strong", {}, "まだ登録は完了していません。"),
+              h("br"), "届いたメールの中のリンクを開いてください。リンクを開くまで、ログインできません。"),
+            h("ul", { class: "mail-tips" },
+              h("li", {}, "メールが届くまで、数分かかることがあります"),
+              h("li", {}, "届かないときは、迷惑メールフォルダを確認してください"),
+              h("li", {}, "メールアドレスを間違えたときは、もう一度新規登録からやり直してください")),
+            h("div", { class: "actions" }, resend),
+            h("p", { class: "links" }, "リンクを開いたあとは ", h("a", { href: "#/login" }, "ログイン画面へ"))));
         }
       });
     });
@@ -509,6 +603,73 @@
       });
     });
     return form;
+  }
+
+  /* ======================================================
+   * 管理者：ユーザー管理（ユーザー名・メールアドレスの一覧、アカウント削除）
+   * ==================================================== */
+  async function viewAdmin() {
+    if (!session) return needLogin("ログインが必要です。");
+    if (!isAdmin) return h("div", { class: "error-box" }, "管理者だけが開けるページです。");
+    const { data, error } = await sb.rpc("admin_list_users");
+    if (error) throw error;
+    const rows = data || [];
+
+    const search = h("input", { type: "search", class: "search", placeholder: "ユーザー名・メールアドレスで検索…" });
+    const tbody = h("tbody", {});
+    const count = h("span", { class: "muted" }, "");
+    const dateOnly = s => (s ? new Date(s).toLocaleDateString("ja-JP") : "—");
+
+    function draw() {
+      const q = search.value.trim().toLowerCase();
+      const items = rows.filter(r => !q || (r.username + " " + r.email).toLowerCase().includes(q));
+      count.textContent = `${items.length}人 / 全${rows.length}人`;
+      tbody.replaceChildren();
+      if (!items.length) tbody.append(h("tr", {}, h("td", { colspan: 6, class: "muted" }, "該当するユーザーがいません。")));
+      items.forEach(r => {
+        const self = r.user_id === session.user.id;
+        let action;
+        if (r.is_admin || self) {
+          action = h("span", { class: "muted" }, self ? "（自分）" : "管理者");
+        } else {
+          action = h("button", { class: "btn small danger", type: "button" }, "削除");
+          action.addEventListener("click", () => {
+            const typed = prompt(
+              `アカウント「${r.username}」（${r.email}）を削除します。\n` +
+              `このユーザーの企画${r.project_count}件・投稿${r.post_count}件、コメント、通知もすべて削除され、元に戻せません。\n\n` +
+              `実行するには、ユーザー名「${r.username}」を入力してください。`);
+            if (typed === null) return;
+            if (typed.trim() !== r.username) { toast("ユーザー名が一致しないため、削除しませんでした", true); return; }
+            busy(action, async () => {
+              const { error: e2 } = await sb.rpc("admin_delete_user", { p_user: r.user_id });
+              if (e2) throw e2;
+              toast(`「${r.username}」を削除しました`);
+              route();
+            });
+          });
+        }
+        tbody.append(h("tr", {},
+          h("td", {}, h("strong", {}, "@" + r.username), r.is_admin ? h("span", { class: "badge open", style: "margin-left:.4rem" }, "管理者") : null),
+          h("td", { class: "mail" }, r.email),
+          h("td", {}, dateOnly(r.created_at)),
+          h("td", {}, r.email_confirmed ? h("span", { class: "badge open" }, "認証済み") : h("span", { class: "badge" }, "未認証")),
+          h("td", {}, `${r.project_count} / ${r.post_count}`),
+          h("td", {}, action)));
+      });
+    }
+    search.addEventListener("input", draw);
+    draw();
+
+    return h("section", {},
+      h("div", { class: "page-head" }, h("h1", {}, "👤 ユーザー管理"), count),
+      h("p", { class: "notice" }, "管理者だけが見られるページです。メールアドレスは他の人には表示されません。取り扱いにご注意ください。"),
+      search,
+      h("div", { class: "card table-wrap" },
+        h("table", { class: "table" },
+          h("thead", {}, h("tr", {},
+            h("th", {}, "ユーザー名"), h("th", {}, "メールアドレス"), h("th", {}, "登録日"),
+            h("th", {}, "メール認証"), h("th", {}, "企画 / 投稿"), h("th", {}, "操作"))),
+          tbody)));
   }
 
   /* ======================================================
@@ -589,23 +750,100 @@
     return form;
   }
 
+  // ユーザー名で検索して選ぶ部品（共同編集者・限定公開の閲覧者の追加で共通に使う）
+  //   onPick(user)：候補の「追加」を押したとき。exclude(id)：候補から除くかどうか
+  function userPicker({ placeholder, onPick, exclude }) {
+    const input = h("input", { type: "search", placeholder: placeholder || "ユーザー名で検索…", autocomplete: "off" });
+    const results = h("div", { class: "picker-results" });
+    let timer = null, seq = 0;
+    async function search() {
+      const q = input.value.trim();
+      const my = ++seq;
+      if (!q) { results.replaceChildren(); return; }
+      const esc = q.replace(/[\\%_]/g, m => "\\" + m);
+      const { data, error } = await sb.from("profiles").select("id,username").ilike("username", `%${esc}%`).order("username").limit(10);
+      if (my !== seq) return;
+      results.replaceChildren();
+      if (error) { results.append(h("p", { class: "muted" }, "検索できませんでした。")); return; }
+      const list = (data || []).filter(u => !(exclude && exclude(u.id)));
+      if (!list.length) { results.append(h("p", { class: "muted" }, "該当するユーザーがいません。")); return; }
+      list.forEach(u => {
+        const add = h("button", { class: "btn small primary", type: "button" }, "追加");
+        add.addEventListener("click", () => busy(add, async () => { await onPick(u); search(); }));
+        results.append(h("div", { class: "picker-row" }, h("span", {}, "@" + u.username), add));
+      });
+    }
+    input.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(search, 250); });
+    return { node: h("div", { class: "picker" }, input, results), refresh: search };
+  }
+
   async function fetchProject(id) {
     const { data, error } = await sb.from("projects").select("*, owner:profiles(username)").eq("id", id).maybeSingle();
     if (error) throw error;
+    if (!data) return data;
+    // 共同編集者（企画主・管理者のほかに、設定変更と投稿ができる人）
+    const { data: collabs } = await sb.from("project_collaborators").select("user_id,user:profiles(username)").eq("project_id", id).order("created_at");
+    data.collaborators = collabs || [];
+    data.isCollab = !!session && data.collaborators.some(c => c.user_id === session.user.id);
     return data;
+  }
+
+  // 共同編集者の管理欄（追加・削除は企画主と管理者だけ。共同編集者本人は一覧を見るだけ）
+  function collaboratorsBox(project, canManage) {
+    const box = h("div", { class: "card" }, h("h2", {}, "👥 共同編集者"),
+      h("p", { class: "muted", style: "margin-top:0" },
+        "共同編集者は、この企画の設定（企画名・説明・投稿許可）の変更と、企画への投稿ができます。他の人の投稿の編集・削除や、企画の削除はできません。"));
+    const list = h("div", {});
+    function drawList() {
+      list.replaceChildren();
+      if (!project.collaborators.length) list.append(h("p", { class: "muted" }, "共同編集者はいません。"));
+      project.collaborators.forEach(c => {
+        const row = h("div", { class: "picker-row" }, h("span", {}, "@" + (c.user ? c.user.username : "?")));
+        if (canManage) {
+          const del = h("button", { class: "btn small danger", type: "button" }, "外す");
+          del.addEventListener("click", () => busy(del, async () => {
+            const { error } = await sb.from("project_collaborators").delete().eq("project_id", project.id).eq("user_id", c.user_id);
+            if (error) throw error;
+            project.collaborators = project.collaborators.filter(x => x.user_id !== c.user_id);
+            drawList(); picker && picker.refresh();
+          }));
+          row.append(del);
+        }
+        list.append(row);
+      });
+    }
+    let picker = null;
+    box.append(list);
+    if (canManage) {
+      picker = userPicker({
+        placeholder: "ユーザー名で検索して、共同編集者を追加…",
+        exclude: id => id === project.owner_id || project.collaborators.some(c => c.user_id === id),
+        onPick: async u => {
+          const { error } = await sb.from("project_collaborators").insert({ project_id: project.id, user_id: u.id });
+          if (error) throw error;
+          project.collaborators.push({ user_id: u.id, user: { username: u.username } });
+          toast(`@${u.username} を共同編集者に追加しました`);
+          drawList();
+        }
+      });
+      box.append(picker.node);
+    }
+    drawList();
+    return box;
   }
 
   async function viewProjectEdit(id) {
     if (!session) return needLogin("ログインが必要です。");
     const project = await fetchProject(id);
     if (!project) return notFound();
-    if (project.owner_id !== session.user.id && !isAdmin) return h("div", { class: "error-box" }, "企画主だけが設定を変更できます。");
+    const isOwnerOrAdmin = project.owner_id === session.user.id || isAdmin;
+    if (!isOwnerOrAdmin && !project.isCollab) return h("div", { class: "error-box" }, "企画主・共同編集者だけが設定を変更できます。");
 
     const f = projectFormFields(project);
     const saveBtn = h("button", { class: "btn primary", type: "submit" }, "保存");
     const delBtn = h("button", { class: "btn danger", type: "button" }, "この企画を削除");
     const form = h("form", { class: "card" }, h("h1", {}, "企画の設定"), ...f.nodes,
-      h("div", { class: "actions" }, saveBtn, h("a", { class: "btn", href: `#/project/${id}` }, "キャンセル"), delBtn));
+      h("div", { class: "actions" }, saveBtn, h("a", { class: "btn", href: `#/project/${id}` }, "キャンセル"), isOwnerOrAdmin ? delBtn : null));
     form.addEventListener("submit", e => {
       e.preventDefault();
       busy(saveBtn, async () => {
@@ -628,11 +866,11 @@
         go("#/");
       });
     });
-    return form;
+    return h("div", {}, form, collaboratorsBox(project, isOwnerOrAdmin));
   }
 
   function canPost(project) {
-    return !!session && (project.owner_id === session.user.id || project.allow_others_post);
+    return !!session && (project.owner_id === session.user.id || project.isCollab || isAdmin || project.allow_others_post);
   }
 
   // 企画ページのコメント欄（改善すべき点などを書き込める）
@@ -739,20 +977,26 @@
   }
 
   async function viewProject(id) {
-    const [project, postsRes, commentsRes] = await Promise.all([
+    const [project, postsRes, commentsRes, myViewRes] = await Promise.all([
       fetchProject(id),
-      sb.from("posts").select("id,title,created_at,author_id,author:profiles(username)")
+      sb.from("posts").select("id,title,created_at,author_id,is_public,author:profiles(username)")
         .eq("project_id", id).order("created_at", { ascending: false }),
       sb.from("comments").select("id,body,created_at,author_id,parent_id,author:profiles(username)")
-        .eq("project_id", id).order("created_at", { ascending: true })
+        .eq("project_id", id).order("created_at", { ascending: true }),
+      // 自分が閲覧を許可されている限定公開の投稿
+      session ? sb.from("post_viewers").select("post_id").eq("user_id", session.user.id) : Promise.resolve({ data: [] })
     ]);
     if (!project) return notFound();
     if (postsRes.error) throw postsRes.error;
     const posts = postsRes.data;
     const isOwner = !!session && (project.owner_id === session.user.id || isAdmin);
+    const canEditProject = isOwner || project.isCollab;
+    const myViewable = new Set((myViewRes.data || []).map(v => v.post_id));
+    // 画面の出し分け用（実際にコードが渡されるかどうかは、データベース側が判定する）
+    const canSee = p => p.is_public !== false || (!!session && (p.author_id === session.user.id || canEditProject || myViewable.has(p.id)));
 
     const zipBtn = h("button", { class: "btn", type: "button" }, "⬇ 企画まるごとZIP");
-    zipBtn.addEventListener("click", () => busy(zipBtn, () => downloadProjectZip(project)));
+    zipBtn.addEventListener("click", () => busy(zipBtn, () => downloadProjectZip(project, posts.length)));
 
     let postAction;
     if (canPost(project)) postAction = h("a", { class: "btn primary", href: `#/project/${id}/new` }, "＋ コードを投稿");
@@ -803,13 +1047,29 @@
       if (!posts.length) list.append(h("p", { class: "muted" }, "まだ投稿がありません。"));
       posts.forEach(p => {
         // 投稿のコードを取得して、HTML1ファイルとしてそのままダウンロード
-        const dlBtn = h("button", { class: "btn small", type: "button" }, "⬇ htmlとしてダウンロード");
-        dlBtn.addEventListener("click", () => busy(dlBtn, async () => {
-          const { data, error } = await sb.from("posts").select("*").eq("id", p.id).maybeSingle();
-          if (error) throw error;
-          if (!data) throw new Error("投稿が見つかりません。");
-          downloadSingleHtml(data);
-        }));
+        const visible = canSee(p);
+        let dlBtn;
+        if (visible) {
+          dlBtn = h("button", { class: "btn small", type: "button" }, "⬇ htmlとしてダウンロード");
+          dlBtn.addEventListener("click", () => busy(dlBtn, async () => {
+            const { data, error } = await sb.rpc("get_post", { p_id: p.id });
+            if (error) throw error;
+            if (!data) throw new Error("投稿が見つかりません。");
+            if (!data.can_view) throw new Error("この投稿は限定公開のため、ダウンロードできません。");
+            downloadSingleHtml(data);
+          }));
+        } else if (!session) {
+          dlBtn = h("a", { class: "btn small", href: "#/login" }, "ログインして公開を要請");
+        } else {
+          dlBtn = h("button", { class: "btn small", type: "button" }, "🔒 公開を要請");
+          dlBtn.addEventListener("click", () => busy(dlBtn, async () => {
+            const { error } = await sb.rpc("request_post_publish", { p_post: p.id });
+            if (error) throw error;
+            dlBtn.textContent = "✓ 要請しました";
+            dlBtn.disabled = true;
+            toast(`@${p.author ? p.author.username : "作成者"} に公開を要請しました`);
+          }));
+        }
         let pick = null;
         if (selecting && canDel(p)) {
           pick = h("input", { type: "checkbox", class: "pick", checked: selected.has(p.id), "aria-label": `「${p.title}」を選択` });
@@ -818,7 +1078,7 @@
         list.append(h("div", { class: "card post-item" + (pick && pick.checked ? " picked" : "") },
           pick,
           h("div", { class: "info" },
-            h("h3", {}, h("a", { href: `#/post/${p.id}` }, p.title)),
+            h("h3", {}, h("a", { href: `#/post/${p.id}` }, p.title), p.is_public === false ? h("span", { class: "badge lock", style: "margin-left:.5rem" }, visible ? "🔒 限定公開" : "🔒 限定公開（閲覧不可）") : null),
             h("div", { class: "meta" }, h("span", {}, "@" + (p.author ? p.author.username : "?")), h("span", {}, fmtDate(p.created_at)))),
           h("div", { class: "actions" },
             h("a", { class: "btn small", href: `#/post/${p.id}` }, "開く"),
@@ -833,8 +1093,10 @@
         h("div", { class: "page-head" },
           h("div", {},
             h("h1", {}, project.title),
-            h("div", { class: "meta" }, openBadge(project), h("span", {}, "企画主 @" + (project.owner ? project.owner.username : "?")), h("span", {}, fmtDate(project.created_at)))),
-          h("div", { class: "actions" }, zipBtn, isOwner ? h("a", { class: "btn", href: `#/project/${id}/edit` }, "⚙ 設定") : null)),
+            h("div", { class: "meta" }, openBadge(project), h("span", {}, "企画主 @" + (project.owner ? project.owner.username : "?")),
+              project.collaborators.length ? h("span", {}, "共同編集者 " + project.collaborators.map(c => "@" + (c.user ? c.user.username : "?")).join("、")) : null,
+              h("span", {}, fmtDate(project.created_at)))),
+          h("div", { class: "actions" }, zipBtn, canEditProject ? h("a", { class: "btn", href: `#/project/${id}/edit` }, "⚙ 設定") : null)),
         project.description ? h("p", { style: "white-space:pre-wrap;margin:0" }, project.description) : null),
       h("div", { class: "page-head" }, h("h2", {}, `投稿（${posts.length}）`), h("div", { class: "actions" }, bulkBtn, postAction)),
       bulkBar,
@@ -861,6 +1123,44 @@
     const html = mk(post && post.html, "<h1>Hello!</h1>\n<button id=\"btn\">押してね</button>");
     const css = mk(post && post.css, "h1 { color: tomato; }");
     const js = mk(post && post.js, "document.getElementById('btn').onclick = () => alert('hi');");
+    // 公開設定（オフ＝限定公開。限定公開のときは、閲覧できる人をユーザー名で追加できる）
+    const isPublic = h("input", { type: "checkbox", checked: editing ? post.is_public !== false : true });
+    const publicRow = h("label", { class: "check" }, isPublic,
+      h("span", {}, "このhtmlを一般公開する",
+        h("small", { class: "hint" }, "オフにすると限定公開になります。企画の投稿一覧には表示されますが、閲覧を許可された人以外は、プレビュー・コード閲覧・ダウンロードができません。投稿したあとも変更できます。")));
+    const viewers = new Map();       // いま選ばれている閲覧者（user_id → ユーザー名）
+    const origViewers = new Map();   // 保存済みの閲覧者
+    const viewerList = h("div", {});
+    function drawViewers() {
+      viewerList.replaceChildren();
+      if (!viewers.size) viewerList.append(h("p", { class: "muted", style: "margin:.2rem 0" }, "閲覧できる人は、まだ追加されていません。"));
+      [...viewers].forEach(([uid, name]) => {
+        const del = h("button", { class: "btn small danger", type: "button" }, "外す");
+        del.addEventListener("click", () => { viewers.delete(uid); drawViewers(); viewerPicker.refresh(); });
+        viewerList.append(h("div", { class: "picker-row" }, h("span", {}, "@" + name), del));
+      });
+    }
+    const viewerPicker = userPicker({
+      placeholder: "ユーザー名で検索して、閲覧できる人を追加…",
+      exclude: id => id === session.user.id || viewers.has(id),
+      onPick: async u => { viewers.set(u.id, u.username); drawViewers(); }
+    });
+    const limitedBox = h("div", { class: "notice limited-box" },
+      h("strong", {}, "🔒 限定公開"),
+      h("p", { style: "margin:.2rem 0 .5rem" }, "作成者・企画主・共同編集者・管理者と、下で追加した人だけが、コードを見られます。（保存したときに反映されます）"),
+      viewerList, viewerPicker.node);
+    const syncVisibility = () => limitedBox.classList.toggle("hidden", isPublic.checked);
+    isPublic.addEventListener("change", syncVisibility);
+    // 編集のときは、いまの閲覧者を読み込む
+    const viewersReady = editing
+      ? sb.from("post_viewers").select("user_id,user:profiles(username)").eq("post_id", post.id).then(r => {
+          (r.data || []).forEach(v => { const n = v.user ? v.user.username : "?"; origViewers.set(v.user_id, n); if (!viewers.has(v.user_id)) viewers.set(v.user_id, n); });
+          drawViewers();
+        })
+      : Promise.resolve();
+    drawViewers();
+    syncVisibility();
+
     const memo = h("textarea", {
       rows: 4, maxlength: 2000, value: (post && post.memo) || "",
       placeholder: "例：v2 ボタンの色を変更。スマホ表示を修正。使い方は〜"
@@ -979,6 +1279,7 @@
           : "各500KBまで。超える場合は、管理者に要請できます（承認されると最大2MBまで）。"),
       field("タイトル", title),
       modeTabs, codeFields, fileBox,
+      publicRow, limitedBox,
       field("メモ（任意）", memo, "改善した点・変更点・使い方などを自由に書けます（2000文字まで）。投稿ページに表示されます。"),
       bigBox,
       h("div", { class: "actions" }, btn, prevBtn, h("a", { class: "btn", href: back }, "キャンセル")),
@@ -987,7 +1288,7 @@
     form.addEventListener("submit", e => {
       e.preventDefault();
       busy(btn, async () => {
-        const row = { title: title.value.trim(), html: html.value, css: css.value, js: js.value, memo: memo.value.trim() };
+        const row = { title: title.value.trim(), html: html.value, css: css.value, js: js.value, memo: memo.value.trim(), is_public: isPublic.checked };
         if (!row.title) throw new Error("タイトルを入力してください。");
         if (!row.html.trim() && !row.css.trim() && !row.js.trim()) throw new Error("HTML / CSS / JavaScript のいずれかを入力してください。");
         for (const k of ["html", "css", "js"]) {
@@ -1000,17 +1301,33 @@
         // 承認済みの回数を使う投稿（すでに大容量の投稿の編集は消費しない）
         const isBigNow = ["html", "css", "js"].some(k => row[k].length > NORMAL_MAX);
         if (isBigNow && !isAdmin && !wasBig && !confirm(`500KBを超える投稿です。大容量投稿の残り回数（${bigQuota}回）を1回消費します。よろしいですか？`)) return;
+        // 閲覧者の追加・削除を、保存済みの状態との差分で反映する
+        const syncViewers = async postId => {
+          await viewersReady;
+          const add = [...viewers.keys()].filter(id => !origViewers.has(id));
+          const remove = [...origViewers.keys()].filter(id => !viewers.has(id));
+          if (add.length) {
+            const { error } = await sb.from("post_viewers").insert(add.map(user_id => ({ post_id: postId, user_id })));
+            if (error) throw error;
+          }
+          if (remove.length) {
+            const { error } = await sb.from("post_viewers").delete().eq("post_id", postId).in("user_id", remove);
+            if (error) throw error;
+          }
+        };
         if (editing) {
           const { error } = await sb.from("posts").update({ ...row, updated_at: new Date().toISOString() }).eq("id", post.id);
           if (error) throw error;
+          await syncViewers(post.id);
           toast("保存しました");
           go(`#/post/${post.id}`);
         } else {
           const { data, error } = await sb.from("posts")
             .insert({ ...row, project_id: project.id, author_id: session.user.id }).select("id").single();
           if (error) throw error;
-          toast("投稿しました");
           if (isBigNow && !isAdmin) await refreshQuota();
+          await syncViewers(data.id);
+          toast("投稿しました");
           go(`#/post/${data.id}`);
         }
       });
@@ -1022,13 +1339,13 @@
     if (!session) return needLogin("投稿するにはログインが必要です。");
     const project = await fetchProject(projectId);
     if (!project) return notFound();
-    if (!canPost(project)) return h("div", { class: "error-box" }, "この企画は企画主のみ投稿できます。");
+    if (!canPost(project)) return h("div", { class: "error-box" }, "この企画は、企画主・共同編集者のみ投稿できます。");
     return postForm(project, null);
   }
 
+  // 投稿の取得。コード（html / css / js / memo）は、閲覧権限がないと空で返ってくる（can_view = false）
   async function fetchPost(id) {
-    const { data, error } = await sb.from("posts")
-      .select("*, author:profiles(username), project:projects(id,title,owner_id)").eq("id", id).maybeSingle();
+    const { data, error } = await sb.rpc("get_post", { p_id: id });
     if (error) throw error;
     return data;
   }
@@ -1047,13 +1364,53 @@
     const isAuthor = !!session && (post.author_id === session.user.id || isAdmin);   // 管理者は編集も可
     const isOwner = !!session && (post.project.owner_id === session.user.id || isAdmin);
 
+    // 限定公開で、閲覧権限がない場合：プレビュー・コード・ダウンロードは出さず、「公開を要請」だけ出す
+    if (!post.can_view) {
+      let req;
+      if (!session) req = h("a", { class: "btn primary", href: "#/login" }, "ログインして公開を要請");
+      else {
+        req = h("button", { class: "btn primary", type: "button" }, "🔒 公開を要請");
+        req.addEventListener("click", () => busy(req, async () => {
+          const { error } = await sb.rpc("request_post_publish", { p_post: id });
+          if (error) throw error;
+          req.textContent = "✓ 要請しました";
+          req.disabled = true;
+          toast(`@${post.author ? post.author.username : "作成者"} に公開を要請しました`);
+        }));
+      }
+      return h("section", {},
+        h("p", {}, h("a", { href: `#/project/${post.project.id}` }, "← " + post.project.title)),
+        h("div", { class: "card locked" },
+          h("h1", {}, post.title, h("span", { class: "badge lock", style: "margin-left:.6rem" }, "🔒 限定公開")),
+          h("div", { class: "meta" }, h("span", {}, "@" + (post.author ? post.author.username : "?")), h("span", {}, fmtDate(post.created_at))),
+          h("div", { class: "lock-box" },
+            h("div", { class: "lock-icon" }, "🔒"),
+            h("p", {}, h("strong", {}, "この投稿は限定公開です")),
+            h("p", { class: "muted" }, "プレビュー・コードの閲覧・ダウンロードは、作成者に許可された人だけができます。「公開を要請」を押すと、あなたのユーザー名が作成者に通知されます。"),
+            req)));
+    }
+
     const htmlBtn = h("button", { class: "btn", type: "button" }, "⬇ HTML（1ファイル）");
     htmlBtn.addEventListener("click", () => downloadSingleHtml(post));
     const zipBtn = h("button", { class: "btn", type: "button" }, "⬇ ZIP（分割）");
     zipBtn.addEventListener("click", () => busy(zipBtn, () => downloadPostZip(post)));
 
     const actions = h("div", { class: "actions" }, htmlBtn, zipBtn);
-    if (isAuthor) actions.append(h("a", { class: "btn", href: `#/post/${id}/edit` }, "編集"));
+    if (isAuthor) {
+      actions.append(h("a", { class: "btn", href: `#/post/${id}/edit` }, "編集"));
+      // 公開設定のワンタッチ切り替え（閲覧者の追加は「編集」から）
+      const toggle = h("button", { class: "btn", type: "button" }, post.is_public ? "🔒 限定公開にする" : "🌐 一般公開にする");
+      toggle.addEventListener("click", () => {
+        if (post.is_public && !confirm("限定公開にします。閲覧を許可した人以外は、この投稿のコードを見られなくなります。よろしいですか？")) return;
+        busy(toggle, async () => {
+          const { error } = await sb.from("posts").update({ is_public: !post.is_public }).eq("id", id);
+          if (error) throw error;
+          toast(post.is_public ? "限定公開にしました" : "一般公開にしました");
+          route();
+        });
+      });
+      actions.append(toggle);
+    }
     if (isAuthor || isOwner) {
       const del = h("button", { class: "btn danger", type: "button" }, "削除");
       del.addEventListener("click", () => {
@@ -1094,7 +1451,7 @@
       h("div", { class: "card" },
         h("div", { class: "page-head" },
           h("div", {},
-            h("h1", {}, post.title),
+            h("h1", {}, post.title, post.is_public === false ? h("span", { class: "badge lock", style: "margin-left:.6rem" }, "🔒 限定公開") : null),
             h("div", { class: "meta" }, h("span", {}, "@" + (post.author ? post.author.username : "?")), h("span", {}, fmtDate(post.created_at)))),
           actions),
         post.memo ? h("div", { class: "memo" },
