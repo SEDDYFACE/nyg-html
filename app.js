@@ -848,9 +848,10 @@
     if (error) throw error;
     if (!data) return data;
     // 共同編集者（企画主・管理者のほかに、設定変更と投稿ができる人）
-    const { data: collabs } = await sb.from("project_collaborators").select("user_id,user:profiles!user_id(username)").eq("project_id", id).order("created_at");
+    const { data: collabs } = await sb.from("project_collaborators").select("user_id,can_view_limited,can_edit_settings,can_post,user:profiles!user_id(username)").eq("project_id", id).order("created_at");
     data.collaborators = collabs || [];
-    data.isCollab = !!session && data.collaborators.some(c => c.user_id === session.user.id);
+    data.myCollab = session ? (data.collaborators.find(c => c.user_id === session.user.id) || null) : null;
+    data.isCollab = !!data.myCollab;
     return data;
   }
 
@@ -858,13 +859,33 @@
   function collaboratorsBox(project, canManage) {
     const box = h("div", { class: "card" }, h("h2", {}, "👥 共同編集者"),
       h("p", { class: "muted", style: "margin-top:0" },
-        "共同編集者は、この企画の設定（企画名・説明・投稿許可）の変更と、企画への投稿ができます。他の人の投稿の編集・削除や、企画の削除はできません。"));
+        "共同編集者に何を許可するかは、人ごとに企画主が決められます（限定公開の投稿を見る／企画の設定（企画名・説明・投稿許可）を変更する／企画へ投稿する）。他の人の投稿の編集・削除や、企画の削除はできません。"));
     const list = h("div", {});
     function drawList() {
       list.replaceChildren();
       if (!project.collaborators.length) list.append(h("p", { class: "muted" }, "共同編集者はいません。"));
       project.collaborators.forEach(c => {
-        const row = h("div", { class: "picker-row" }, h("span", {}, "@" + (c.user ? c.user.username : "?")));
+        const row = h("div", { class: "picker-row collab-row" }, h("span", { class: "collab-name" }, "@" + (c.user ? c.user.username : "?")));
+        const permDefs = [["can_view_limited", "限定公開を見る"], ["can_edit_settings", "企画の設定変更"], ["can_post", "投稿"]];
+        const perms = h("span", { class: "perms" });
+        permDefs.forEach(([key, label]) => {
+          if (canManage) {
+            const cb = h("input", { type: "checkbox" });
+            cb.checked = c[key] !== false;
+            cb.addEventListener("change", async () => {
+              cb.disabled = true;
+              const { error } = await sb.from("project_collaborators").update({ [key]: cb.checked }).eq("project_id", project.id).eq("user_id", c.user_id);
+              cb.disabled = false;
+              if (error) { cb.checked = !cb.checked; toast(friendly(error), true); return; }
+              c[key] = cb.checked;
+              toast("権限を変更しました");
+            });
+            perms.append(h("label", { class: "perm" }, cb, " " + label));
+          } else {
+            perms.append(h("span", { class: "badge " + (c[key] !== false ? "open" : "") }, label + (c[key] !== false ? "：可" : "：不可")));
+          }
+        });
+        row.append(perms);
         if (canManage) {
           const del = h("button", { class: "btn small danger", type: "button" }, "外す");
           del.addEventListener("click", () => busy(del, async () => {
@@ -903,7 +924,7 @@
     const project = await fetchProject(id);
     if (!project) return notFound();
     const isOwnerOrAdmin = project.owner_id === session.user.id || isAdmin;
-    if (!isOwnerOrAdmin && !project.isCollab) return h("div", { class: "error-box" }, "企画主・共同編集者だけが設定を変更できます。");
+    if (!isOwnerOrAdmin && !(project.myCollab && project.myCollab.can_edit_settings)) return h("div", { class: "error-box" }, "企画主、または設定変更を許可された共同編集者だけが設定を変更できます。");
 
     const f = projectFormFields(project);
     const saveBtn = h("button", { class: "btn primary", type: "submit" }, "保存");
@@ -936,7 +957,7 @@
   }
 
   function canPost(project) {
-    return !!session && (project.owner_id === session.user.id || project.isCollab || isAdmin || project.allow_others_post);
+    return !!session && (project.owner_id === session.user.id || isAdmin || (project.myCollab && project.myCollab.can_post) || project.allow_others_post);
   }
 
   // 企画ページのコメント欄（改善すべき点などを書き込める）
@@ -1056,10 +1077,11 @@
     if (postsRes.error) throw postsRes.error;
     const posts = postsRes.data;
     const isOwner = !!session && (project.owner_id === session.user.id || isAdmin);
-    const canEditProject = isOwner || project.isCollab;
+    const canEditProject = isOwner || !!(project.myCollab && project.myCollab.can_edit_settings);
+    const canSeeLimited = isOwner || !!(project.myCollab && project.myCollab.can_view_limited);
     const myViewable = new Set((myViewRes.data || []).map(v => v.post_id));
     // 画面の出し分け用（実際にコードが渡されるかどうかは、データベース側が判定する）
-    const canSee = p => p.is_public !== false || (!!session && (p.author_id === session.user.id || canEditProject || myViewable.has(p.id)));
+    const canSee = p => p.is_public !== false || (!!session && (p.author_id === session.user.id || canSeeLimited || myViewable.has(p.id)));
 
     const zipBtn = h("button", { class: "btn", type: "button" }, "⬇ 企画まるごとZIP");
     zipBtn.addEventListener("click", () => busy(zipBtn, () => downloadProjectZip(project, posts.length)));
@@ -1425,6 +1447,47 @@
     return postForm(post.project, post);
   }
 
+  // 限定公開の「公開対象」欄：コードを見られる人の一覧と、追加・削除（作成者・企画主・管理者）
+  function viewersBox(post) {
+    const box = h("div", { class: "card" }, h("h2", {}, "👁 公開対象（限定公開）"),
+      h("p", { class: "muted", style: "margin-top:0" },
+        "ここに追加した人は、この投稿のプレビュー・コードの閲覧・ダウンロードができます。作成者・企画主・管理者と、閲覧を許可された共同編集者は、追加しなくても見られます。"));
+    const list = h("div", {});
+    const viewers = new Map();
+    function drawList() {
+      list.replaceChildren();
+      if (!viewers.size) list.append(h("p", { class: "muted" }, "追加された人はまだいません。"));
+      viewers.forEach((name, uid) => {
+        const del = h("button", { class: "btn small danger", type: "button" }, "外す");
+        del.addEventListener("click", () => busy(del, async () => {
+          const { error } = await sb.from("post_viewers").delete().eq("post_id", post.id).eq("user_id", uid);
+          if (error) throw error;
+          viewers.delete(uid);
+          drawList(); picker.refresh();
+        }));
+        list.append(h("div", { class: "picker-row" }, h("span", {}, "@" + name), del));
+      });
+    }
+    const picker = userPicker({
+      placeholder: "ユーザー名で検索して、公開対象を追加…",
+      exclude: uid => uid === post.author_id || uid === post.project.owner_id || viewers.has(uid),
+      onPick: async u => {
+        const { error } = await sb.from("post_viewers").insert({ post_id: post.id, user_id: u.id });
+        if (error) throw error;
+        viewers.set(u.id, u.username);
+        toast(`@${u.username} に閲覧を許可しました`);
+        drawList();
+      }
+    });
+    box.append(list, picker.node);
+    drawList();
+    sb.from("post_viewers").select("user_id,user:profiles!user_id(username)").eq("post_id", post.id).then(r => {
+      (r.data || []).forEach(v => viewers.set(v.user_id, v.user ? v.user.username : "?"));
+      drawList();
+    });
+    return box;
+  }
+
   async function viewPost(id) {
     const post = await fetchPost(id);
     if (!post) return notFound();
@@ -1525,7 +1588,8 @@
           h("h3", {}, "📝 投稿者のメモ"),
           h("p", {}, post.memo)) : null,
         h("p", { class: "notice" }, "投稿者が書いたコードです。プレビューは隔離された領域で実行されています。ダウンロードしたコードは、内容を確認してから実行してください。"),
-        tabs, body));
+        tabs, body),
+      (post.is_public === false && (isAuthor || isOwner)) ? viewersBox(post) : null);
   }
 
   /* 起動時は onAuthStateChange(INITIAL_SESSION) が最初の描画を行う */
