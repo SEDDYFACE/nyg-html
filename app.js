@@ -53,6 +53,8 @@
     if (/already requested/i.test(m)) return "すでに公開を要請済みです。作成者の対応をお待ちください。";
     if (/already public/i.test(m)) return "この投稿は、すでに閲覧できる状態です。";
     if (/cannot delete yourself/i.test(m)) return "自分自身のアカウントは削除できません。";
+    if (/username taken/i.test(m)) return "そのユーザー名はすでに使われています。";
+    if (/invalid username/i.test(m)) return "ユーザー名は半角英数字とアンダースコアの3〜20文字にしてください。";
     if (/cannot delete admin/i.test(m)) return "管理者アカウントは削除できません。";
     return m;
   }
@@ -95,6 +97,22 @@
   let isAdmin = false;     // 管理者か（データベース側の admins 表で決まる）
   let lastUserId;          // undefined = 未初期化
   let renderToken = 0;
+
+  // 管理者のユーザー名（緑の「管理者」バッジ用）
+  let adminNames = new Set();
+  async function loadAdminNames() {
+    try {
+      const { data } = await sb.rpc("admin_usernames");
+      adminNames = new Set((data || []).map(x => String(x).toLowerCase()));
+    } catch (e) { /* バッジが出ないだけ */ }
+  }
+  // 「@名前」＋（管理者なら）緑の「管理者」マーク
+  function nameTag(username, strong) {
+    const name = username || "?";
+    const t = h(strong ? "strong" : "span", {}, "@" + name);
+    const isAdm = adminNames.has(String(name).toLowerCase());
+    return h("span", { class: "nametag" }, t, isAdm ? h("span", { class: "badge open admin-badge" }, "管理者") : null);
+  }
 
   async function loadProfile() {
     profile = null;
@@ -141,7 +159,7 @@
     if (session) {
       // append(null) は「null」という文字が入ってしまうので、使わない要素は配列から除く
       navEl.append(...[
-        h("span", { class: "who" }, profile ? `@${profile.username}` : "", isAdmin ? h("span", { class: "badge open", style: "margin-left:.4rem" }, "管理者") : null),
+        h("a", { class: "who", href: "#/account", title: "ユーザー名の変更" }, profile ? `@${profile.username}` : "", isAdmin ? h("span", { class: "badge open", style: "margin-left:.4rem" }, "管理者") : null),
         isAdmin ? h("a", { class: "btn small", href: "#/admin" }, "👤 ユーザー管理") : null,
         h("a", { class: "btn small primary", href: "#/new-project" }, "＋ 企画を作る"),
         h("button", {
@@ -430,6 +448,7 @@
    * ==================================================== */
   async function route() {
     const token = ++renderToken;
+    await loadAdminNames();
     loadNotifs();   // ベルの更新（待たない）
     const seg = location.hash.replace(/^#\/?/, "").split("?")[0].split("/").filter(Boolean);
     try {
@@ -441,6 +460,7 @@
       else if (a === "forgot") view = viewForgot();
       else if (a === "reset") view = viewReset();
       else if (a === "admin") view = await viewAdmin();
+      else if (a === "account") view = viewAccount();
       else if (a === "new-project") view = viewProjectForm(null);
       else if (a === "project" && b && c === "edit") view = await viewProjectEdit(b);
       else if (a === "project" && b && c === "new") view = await viewPostNew(b);
@@ -688,13 +708,13 @@
       p.description ? h("p", { class: "desc" }, p.description) : null,
       h("div", { class: "meta" },
         openBadge(p),
-        h("span", {}, "企画主 @" + (p.owner ? p.owner.username : "?")),
+        h("span", {}, "企画主 ", nameTag(p.owner && p.owner.username)),
         h("span", {}, `投稿 ${count}件`)));
   }
 
   async function viewHome() {
     const { data, error } = await sb.from("projects")
-      .select("id,title,description,allow_others_post,created_at,owner:profiles!owner_id(username)")
+      .select("id,title,description,allow_others_post,created_at,owner_id,owner:profiles!owner_id(username)")
       .order("created_at", { ascending: false });
     if (error) throw error;
     // 投稿数は、投稿の project_id だけを取得して数える（1000件ずつ）
@@ -709,11 +729,20 @@
 
     const search = h("input", { type: "search", class: "search", placeholder: "企画を検索…" });
     const list = h("div", { class: "grid" });
+    let onlyMine = false;
+    const mineBtn = session ? h("button", { class: "btn", type: "button" }, "自分の企画") : null;
+    if (mineBtn) mineBtn.addEventListener("click", () => {
+      onlyMine = !onlyMine;
+      mineBtn.classList.toggle("primary", onlyMine);
+      mineBtn.textContent = onlyMine ? "✓ 自分の企画（解除する）" : "自分の企画";
+      draw();
+    });
     function draw() {
       const q = search.value.trim().toLowerCase();
-      const items = data.filter(p => !q || (p.title + " " + p.description).toLowerCase().includes(q));
+      const items = data.filter(p => (!onlyMine || (session && p.owner_id === session.user.id)) &&
+        (!q || (p.title + " " + p.description).toLowerCase().includes(q)));
       list.replaceChildren();
-      if (!items.length) list.append(h("p", { class: "muted empty" }, data.length ? "該当する企画がありません。" : "まだ企画がありません。最初の企画を作ってみましょう！"));
+      if (!items.length) list.append(h("p", { class: "muted empty" }, onlyMine && !q ? "あなたが企画主の企画はまだありません。" : data.length ? "該当する企画がありません。" : "まだ企画がありません。最初の企画を作ってみましょう！"));
       items.forEach(p => list.append(projectCard(p)));
     }
     search.addEventListener("input", draw);
@@ -723,7 +752,35 @@
       h("div", { class: "page-head" },
         h("h1", {}, "企画一覧"),
         session ? h("a", { class: "btn primary", href: "#/new-project" }, "＋ 企画を作る") : null),
-      search, list);
+      h("div", { class: "search-row" }, search, mineBtn), list);
+  }
+
+  function viewAccount() {
+    if (!session || !profile) return needLogin("ユーザー名を変更するにはログインが必要です。");
+    const u = h("input", { type: "text", required: true, maxlength: 20, pattern: "[A-Za-z0-9_]{3,20}", value: profile.username, autocomplete: "off" });
+    const btn = h("button", { class: "btn primary", type: "submit" }, "変更する");
+    const form = h("form", { class: "card form" },
+      h("h1", {}, "アカウント設定"),
+      h("p", { class: "muted" }, "ユーザー名は半角英数字とアンダースコアの3〜20文字です。変更すると、ログイン時のユーザー名も新しい名前になります。投稿・コメントなどには新しい名前が表示されます。" +
+        (isAdmin ? "管理者の権限は、名前を変えてもそのまま引き継がれます。" : "")),
+      field("ユーザー名", u),
+      h("div", { class: "actions" }, btn, h("a", { class: "btn", href: "#/" }, "戻る")));
+    form.addEventListener("submit", e => {
+      e.preventDefault();
+      busy(btn, async () => {
+        const name = u.value.trim();
+        if (!/^[A-Za-z0-9_]{3,20}$/.test(name)) throw new Error("ユーザー名は半角英数字とアンダースコアの3〜20文字にしてください。");
+        if (name === profile.username) throw new Error("今のユーザー名と同じです。");
+        const { error } = await sb.rpc("change_username", { p_new: name });
+        if (error) throw error;
+        await loadProfile();
+        await loadAdminNames();
+        renderNav();
+        toast("ユーザー名を変更しました");
+        go("#/");
+      });
+    });
+    return form;
   }
 
   function projectFormFields(project) {
@@ -930,7 +987,7 @@
       const actions = h("div", { class: "actions" });
       const replyHolder = h("div", {});
       const item = h("div", { class: "comment", id: "c-" + c.id },
-        h("div", { class: "meta" }, h("strong", {}, "@" + name), h("span", {}, fmtDate(c.created_at))),
+        h("div", { class: "meta" }, nameTag(name, true), h("span", {}, fmtDate(c.created_at))),
         h("p", { class: "body" }, c.body), actions, replyHolder);
 
       if (session) {
@@ -1088,7 +1145,7 @@
           pick,
           h("div", { class: "info" },
             h("h3", {}, h("a", { href: `#/post/${p.id}` }, p.title), p.is_public === false ? h("span", { class: "badge lock", style: "margin-left:.5rem" }, visible ? "🔒 限定公開" : "🔒 限定公開（閲覧不可）") : null),
-            h("div", { class: "meta" }, h("span", {}, "@" + (p.author ? p.author.username : "?")), h("span", {}, fmtDate(p.created_at)))),
+            h("div", { class: "meta" }, nameTag(p.author && p.author.username), h("span", {}, fmtDate(p.created_at)))),
           h("div", { class: "actions" },
             h("a", { class: "btn small", href: `#/post/${p.id}` }, "開く"),
             dlBtn)));
@@ -1102,8 +1159,8 @@
         h("div", { class: "page-head" },
           h("div", {},
             h("h1", {}, project.title),
-            h("div", { class: "meta" }, openBadge(project), h("span", {}, "企画主 @" + (project.owner ? project.owner.username : "?")),
-              project.collaborators.length ? h("span", {}, "共同編集者 " + project.collaborators.map(c => "@" + (c.user ? c.user.username : "?")).join("、")) : null,
+            h("div", { class: "meta" }, openBadge(project), h("span", {}, "企画主 ", nameTag(project.owner && project.owner.username)),
+              project.collaborators.length ? h("span", {}, "共同編集者 ", ...project.collaborators.flatMap((c, i) => [i ? "、" : null, nameTag(c.user && c.user.username)].filter(Boolean))) : null,
               h("span", {}, fmtDate(project.created_at)))),
           h("div", { class: "actions" }, zipBtn, canEditProject ? h("a", { class: "btn", href: `#/project/${id}/edit` }, "⚙ 設定") : null)),
         project.description ? h("p", { style: "white-space:pre-wrap;margin:0" }, project.description) : null),
@@ -1392,7 +1449,7 @@
         h("p", {}, h("a", { href: `#/project/${post.project.id}` }, "← " + post.project.title)),
         h("div", { class: "card locked" },
           h("h1", {}, post.title, h("span", { class: "badge lock", style: "margin-left:.6rem" }, "🔒 限定公開")),
-          h("div", { class: "meta" }, h("span", {}, "@" + (post.author ? post.author.username : "?")), h("span", {}, fmtDate(post.created_at))),
+          h("div", { class: "meta" }, nameTag(post.author && post.author.username), h("span", {}, fmtDate(post.created_at))),
           h("div", { class: "lock-box" },
             h("div", { class: "lock-icon" }, "🔒"),
             h("p", {}, h("strong", {}, "この投稿は限定公開です")),
@@ -1462,7 +1519,7 @@
         h("div", { class: "page-head" },
           h("div", {},
             h("h1", {}, post.title, post.is_public === false ? h("span", { class: "badge lock", style: "margin-left:.6rem" }, "🔒 限定公開") : null),
-            h("div", { class: "meta" }, h("span", {}, "@" + (post.author ? post.author.username : "?")), h("span", {}, fmtDate(post.created_at)))),
+            h("div", { class: "meta" }, nameTag(post.author && post.author.username), h("span", {}, fmtDate(post.created_at)))),
           actions),
         post.memo ? h("div", { class: "memo" },
           h("h3", {}, "📝 投稿者のメモ"),
