@@ -53,6 +53,9 @@
     if (/already requested/i.test(m)) return "すでに公開を要請済みです。作成者の対応をお待ちください。";
     if (/already public/i.test(m)) return "この投稿は、すでに閲覧できる状態です。";
     if (/cannot delete yourself/i.test(m)) return "自分自身のアカウントは削除できません。";
+    if (/account frozen/i.test(m)) return "アカウントが一時凍結されています。メール認証を完了すると、また使えるようになります。";
+    if (/nonce|reauthentication/i.test(m)) return "メールで届いた認証コードが違うか、期限切れです。コードをもう一度送って、やり直してください。";
+    if (/same.*password|different from the old/i.test(m)) return "新しいパスワードは、今のパスワードと違うものにしてください。";
     if (/username taken/i.test(m)) return "そのユーザー名はすでに使われています。";
     if (/invalid username/i.test(m)) return "ユーザー名は半角英数字とアンダースコアの3〜20文字にしてください。";
     if (/cannot delete admin/i.test(m)) return "管理者アカウントは削除できません。";
@@ -114,15 +117,55 @@
     return h("span", { class: "nametag" }, t, isAdm ? h("span", { class: "badge open admin-badge" }, "管理者") : null);
   }
 
+  // メール認証の状態（{verified, frozen, seconds_left}。SQL 未実行などで取れないときは null）
+  let acct = null;
+  async function loadAccountStatus() {
+    acct = null;
+    if (!session) return;
+    try {
+      // メールのリンクでログインしてきた場合は、ここで「認証済み」が記録される
+      await sb.rpc("confirm_my_email");
+      const { data, error } = await sb.rpc("my_account_status");
+      if (!error && data) acct = data;
+    } catch (e) { /* 取れなければ、催促は出さない */ }
+  }
+  const daysLeft = () => acct ? Math.max(0, Math.ceil(acct.seconds_left / 86400)) : 0;
+  // 認証メールを送る（メール内のリンクを開くと、認証済みになる）
+  async function sendVerifyMail() {
+    const { error } = await sb.auth.signInWithOtp({ email: session.user.email, options: { shouldCreateUser: false, emailRedirectTo: BASE_URL } });
+    if (error) throw error;
+  }
+  const bannerEl = document.getElementById("banner");
+  let nagged = false;
+  function renderBanner() {
+    bannerEl.replaceChildren();
+    if (!session || !acct || acct.verified || acct.frozen) return;
+    const d = daysLeft();
+    const send = h("button", { class: "btn small primary", type: "button" }, "認証メールを送る");
+    send.addEventListener("click", () => busy(send, async () => {
+      await sendVerifyMail();
+      toast("認証メールを送りました。届いたメールのリンクを開いてください");
+      send.textContent = "もう一度送る";
+    }));
+    bannerEl.append(h("div", { class: "verify-banner" },
+      h("span", {}, "📧 メールアドレスの認証がまだ済んでいません。",
+        d <= 1 ? h("strong", {}, "あと1日未満で、") : h("strong", {}, `あと${d}日で、`),
+        "このアカウントは一時凍結されます（メール認証を完了するまで使えなくなります）。"),
+      send));
+    if (!nagged) { nagged = true; toast(`メール認証がまだです。あと${d}日で凍結されます`, true); }
+  }
+
   async function loadProfile() {
     profile = null;
     isAdmin = false;
+    acct = null;
     if (!session) return;
     const { data } = await sb.from("profiles").select("id,username").eq("id", session.user.id).maybeSingle();
     profile = data;
     // 管理者かどうかの確認（画面の出し分け用。実際の権限はデータベース側で強制される）
     const { data: adm } = await sb.rpc("is_admin");
     isAdmin = adm === true;
+    await loadAccountStatus();
     await refreshQuota();
   }
 
@@ -145,6 +188,12 @@
         if (location.hash !== "#/reset") go("#/reset"); else route();
         return;
       }
+      if (event === "SIGNED_IN" && uid && uid === lastUserId && acct && !acct.verified) {
+        // メールのリンクから戻ってきたときなど：認証が済んだかを確認する
+        await loadAccountStatus();
+        if (acct && acct.verified) { toast("メール認証が完了しました"); renderNav(); route(); }
+        return;
+      }
       if (event === "INITIAL_SESSION" || uid !== lastUserId) {
         lastUserId = uid;
         await loadProfile();
@@ -155,6 +204,7 @@
   });
 
   function renderNav() {
+    renderBanner();
     navEl.replaceChildren();
     if (session) {
       // append(null) は「null」という文字が入ってしまうので、使わない要素は配列から除く
@@ -454,7 +504,9 @@
     try {
       let view;
       const [a, b, c] = seg;
-      if (!a) view = await viewHome();
+      if (session && acct && !acct.verified) { await loadAccountStatus(); renderNav(); }   // 別のタブで認証した場合に追いつく
+      if (session && acct && acct.frozen && a !== "login") view = viewFrozen();
+      else if (!a) view = await viewHome();
       else if (a === "login") view = viewLogin();
       else if (a === "signup") view = viewSignup();
       else if (a === "forgot") view = viewForgot();
@@ -485,6 +537,26 @@
   /* ======================================================
    * 認証まわり
    * ==================================================== */
+  function viewFrozen() {
+    const send = h("button", { class: "btn primary", type: "button" }, "認証メールを送る");
+    send.addEventListener("click", () => busy(send, async () => {
+      await sendVerifyMail();
+      toast("認証メールを送りました。届いたメールのリンクを開いてください");
+    }));
+    const recheck = h("button", { class: "btn", type: "button" }, "認証が済んだので、確認する");
+    recheck.addEventListener("click", () => busy(recheck, async () => {
+      await loadAccountStatus();
+      if (acct && !acct.frozen) { toast("凍結を解除しました"); renderNav(); route(); }
+      else toast("まだ認証が確認できません。メールのリンクを開いてから、もう一度お試しください", true);
+    }));
+    return h("div", { class: "card narrow" },
+      h("h1", {}, "🧊 アカウントが一時凍結されています"),
+      h("p", {}, "登録から1週間がたっても、メールアドレスの認証が済んでいないため、このアカウントは一時的に使えなくなっています。"),
+      h("div", { class: "notice" }, h("strong", {}, "メール認証を完了すると、すぐに使えるようになります。"),
+        h("br"), "「認証メールを送る」を押して、届いたメールのリンクを開いてください（メールが届くまで数分かかることがあります。迷惑メールフォルダも確認してください）。"),
+      h("div", { class: "actions" }, send, recheck));
+  }
+
   function viewLogin() {
     if (session) { setTimeout(() => go("#/"), 0); return h("div"); }
     const u = h("input", { type: "text", autocomplete: "username", required: true, maxlength: 20 });
@@ -523,8 +595,9 @@
         h("strong", {}, "📧 メールアドレスの認証が必要です"),
         h("ol", {},
           h("li", {}, "下の項目を入力して、「登録して確認メールを受け取る」を押す"),
-          h("li", {}, "届いた確認メールの中のリンクを開く（開くまでログインできません）"),
-          h("li", {}, "ユーザー名とパスワードでログインする"))),
+          h("li", {}, "届いたメールの中のリンクを開いて、メール認証を完了する"),
+          h("li", {}, "ユーザー名とパスワードでログインする")),
+        h("p", { class: "muted", style: "margin:.4rem 0 0" }, "登録から1週間たっても認証が済んでいないと、アカウントが一時凍結され、認証を完了するまで使えなくなります。")),
       field("メールアドレス（確認メールが届きます）", email, "実際に受け取れるアドレスを入力してください。パスワードを忘れたときの再設定にも使います（他の人には表示されません）"),
       field("ユーザー名", u, "半角英数字とアンダースコア、3〜20文字。ログイン時に使います"),
       field("パスワード", p1, "8文字以上"),
@@ -551,7 +624,9 @@
           throw new Error("このメールアドレスは既に登録されています。");
         }
         if (data.session) {
-          toast("登録しました");
+          // 確認メールなしで登録できる設定のとき：すぐ使えるが、認証メールを送って認証を促す
+          try { await sendVerifyMail(); toast("登録しました。認証メールを送りました。届いたメールのリンクを開いてください"); }
+          catch (e) { toast("登録しました。画面上部のボタンから、認証メールを送ってください"); }
           go("#/");
         } else {
           const sentTo = email.value.trim();
@@ -565,7 +640,7 @@
             h("h1", {}, "📧 確認メールを送信しました"),
             h("p", {}, "送信先：", h("strong", {}, sentTo)),
             h("div", { class: "notice" }, h("strong", {}, "まだ登録は完了していません。"),
-              h("br"), "届いたメールの中のリンクを開いてください。リンクを開くまで、ログインできません。"),
+              h("br"), "届いたメールの中のリンクを開いてください。リンクを開くまで、ログインできません。登録から1週間たっても認証が済んでいないアカウントは、一時凍結されます。"),
             h("ul", { class: "mail-tips" },
               h("li", {}, "メールが届くまで、数分かかることがあります"),
               h("li", {}, "届かないときは、迷惑メールフォルダを確認してください"),
@@ -668,11 +743,25 @@
             });
           });
         }
+        if (!r.email_confirmed) {
+          const ver = h("button", { class: "btn small", type: "button", style: "margin-right:.3rem" }, "認証済みにする");
+          ver.addEventListener("click", () => {
+            if (!confirm(`@${r.username} を、メール認証済みにします（凍結中なら解除されます）。よろしいですか？`)) return;
+            busy(ver, async () => {
+              const { error: e3 } = await sb.rpc("admin_verify_user", { p_user: r.user_id });
+              if (e3) throw e3;
+              toast("認証済みにしました");
+              route();
+            });
+          });
+          action = h("span", {}, ver, action);
+        }
         tbody.append(h("tr", {},
           h("td", {}, h("strong", {}, "@" + r.username), r.is_admin ? h("span", { class: "badge open", style: "margin-left:.4rem" }, "管理者") : null),
           h("td", { class: "mail" }, r.email),
           h("td", {}, dateOnly(r.created_at)),
-          h("td", {}, r.email_confirmed ? h("span", { class: "badge open" }, "認証済み") : h("span", { class: "badge" }, "未認証")),
+          h("td", {}, r.email_confirmed ? h("span", { class: "badge open" }, "認証済み") : h("span", { class: "badge" }, "未認証"),
+            r.frozen ? h("span", { class: "badge lock", style: "margin-left:.3rem" }, "🧊 凍結中") : null),
           h("td", {}, `${r.project_count} / ${r.post_count}`),
           h("td", {}, action)));
       });
@@ -780,6 +869,55 @@
         go("#/");
       });
     });
+    return h("div", {}, form, passwordCard());
+  }
+
+  // パスワード変更：①今のパスワード → ②メールに届く認証コード → ③新しいパスワード
+  function passwordCard() {
+    const old = h("input", { type: "password", autocomplete: "current-password", required: true });
+    const sendBtn = h("button", { class: "btn", type: "submit" }, "① 認証コードをメールで送る");
+    const code = h("input", { type: "text", inputmode: "numeric", autocomplete: "one-time-code", maxlength: 12, placeholder: "メールに届いたコード" });
+    const n1 = h("input", { type: "password", autocomplete: "new-password", minlength: 8 });
+    const n2 = h("input", { type: "password", autocomplete: "new-password", minlength: 8 });
+    const changeBtn = h("button", { class: "btn primary", type: "button" }, "② パスワードを変更する");
+    const step2 = h("div", { class: "hidden" },
+      h("div", { class: "notice" }, "📧 " + (session.user.email || "") + " に、認証コードを送りました。届いたコードと、新しいパスワードを入力してください。"),
+      field("メールに届いた認証コード", code),
+      field("新しいパスワード", n1, "8文字以上"),
+      field("新しいパスワード（確認）", n2),
+      h("div", { class: "actions" }, changeBtn));
+    const form = h("form", { class: "card form" },
+      h("h2", {}, "🔑 パスワードの変更"),
+      h("p", { class: "muted" }, "安全のため、「今のパスワード」「メールで届く認証コード」「新しいパスワード」の3つが必要です。"),
+      field("今のパスワード", old),
+      h("div", { class: "actions" }, sendBtn),
+      step2);
+    let oldPw = "";
+    form.addEventListener("submit", e => {
+      e.preventDefault();
+      busy(sendBtn, async () => {
+        // 今のパスワードが正しいかを、実際にログインして確かめる
+        const { error: e1 } = await sb.auth.signInWithPassword({ email: session.user.email, password: old.value });
+        if (e1) throw new Error("今のパスワードが違います。");
+        const { error: e2 } = await sb.auth.reauthenticate();
+        if (e2) throw e2;
+        oldPw = old.value;
+        step2.classList.remove("hidden");
+        toast("認証コードをメールで送りました");
+      });
+    });
+    changeBtn.addEventListener("click", () => busy(changeBtn, async () => {
+      if (!code.value.trim()) throw new Error("メールに届いた認証コードを入力してください。");
+      if (n1.value.length < 8) throw new Error("新しいパスワードは8文字以上にしてください。");
+      if (n1.value !== n2.value) throw new Error("新しいパスワードが一致しません。");
+      if (n1.value === oldPw) throw new Error("新しいパスワードは、今のパスワードと違うものにしてください。");
+      const { error } = await sb.auth.updateUser({ password: n1.value, nonce: code.value.trim(), current_password: oldPw });
+      if (error) throw error;
+      [old, code, n1, n2].forEach(i => { i.value = ""; });
+      oldPw = "";
+      step2.classList.add("hidden");
+      toast("パスワードを変更しました");
+    }));
     return form;
   }
 
