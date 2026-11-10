@@ -53,6 +53,8 @@
     if (/already requested/i.test(m)) return "すでに公開を要請済みです。作成者の対応をお待ちください。";
     if (/already public/i.test(m)) return "この投稿は、すでに閲覧できる状態です。";
     if (/cannot delete yourself/i.test(m)) return "自分自身のアカウントは削除できません。";
+    if (/not allowed/i.test(m)) return "この操作はできません。";
+    if (/message not found/i.test(m)) return "メッセージが見つかりません（削除された可能性があります）。";
     if (/too fast/i.test(m)) return "送信は3秒に1回までです。";
     if (/message too long/i.test(m)) return "一回の投稿で200文字までです。";
     if (/empty message/i.test(m)) return "メッセージを入力してください。";
@@ -989,7 +991,7 @@
     const hm = d.toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" });
     return d.toDateString() === now.toDateString() ? hm : `${d.getMonth() + 1}/${d.getDate()} ${hm}`;
   };
-  const DM_SELECT = "id,sender_id,recipient_id,body,created_at,read_at,sender:profiles!sender_id(username),recipient:profiles!recipient_id(username)";
+  const DM_SELECT = "id,sender_id,recipient_id,body,created_at,read_at,edited_at,sender:profiles!sender_id(username),recipient:profiles!recipient_id(username)";
   const dmNotice = () => h("p", { class: "muted dm-note" }, "メッセージは1週間で自動削除されます");
 
   async function viewMessages() {
@@ -1026,11 +1028,56 @@
       h("div", { class: "dm-list" }, list));
   }
 
-  function dmBubble(m, meId) {
+  // メッセージ1件。送った本人と管理者には「編集」「削除」が付く。reload は変更後の再読み込み。
+  function dmBubble(m, meId, reload) {
     const mine = m.sender_id === meId;
-    return h("div", { class: "dm-row" + (mine ? " mine" : "") },
-      h("div", { class: "dm-bubble" }, m.body),
-      h("div", { class: "dm-time" }, (m.sender && !mine ? m.sender.username + "・" : "") + dmTime(m.created_at)));
+    const canAct = !!reload && (mine || isAdmin);
+    const bubble = h("div", { class: "dm-bubble" }, m.body);
+    const meta = h("div", { class: "dm-time" },
+      (m.sender && !mine ? m.sender.username + "・" : "") + dmTime(m.created_at) + (m.edited_at ? "（編集済み）" : ""));
+    const row = h("div", { class: "dm-row" + (mine ? " mine" : ""), "data-id": m.id }, bubble, meta);
+    if (!canAct) return row;
+
+    const edit = h("button", { class: "dm-act", type: "button" }, "編集");
+    const del = h("button", { class: "dm-act danger", type: "button" }, "削除");
+    meta.append(edit, del);
+    del.addEventListener("click", () => {
+      if (!confirm("このメッセージを削除します。よろしいですか？")) return;
+      busy(del, async () => {
+        const { error } = await sb.rpc("delete_dm", { p_id: m.id });
+        if (error) throw error;
+        toast("メッセージを削除しました");
+        await reload();
+      });
+    });
+    edit.addEventListener("click", () => {
+      row.classList.add("editing");
+      const ta = h("textarea", { class: "dm-edit", rows: 2 });
+      ta.value = m.body;
+      const warn = h("div", { class: "dm-warn hidden", role: "alert" });
+      const save = h("button", { class: "btn small primary", type: "button" }, "保存");
+      const cancel = h("button", { class: "btn small", type: "button" }, "キャンセル");
+      const done = () => { row.classList.remove("editing"); return reload(); };
+      const doSave = () => busy(save, async () => {
+        const nb = ta.value.trim();
+        if (!nb) { warn.textContent = "メッセージを入力してください"; warn.classList.remove("hidden"); return; }
+        if (!isAdmin && nb.length > 200) { warn.textContent = "一回の投稿で200文字までです"; warn.classList.remove("hidden"); return; }
+        if (nb === m.body) { await done(); return; }
+        const { error } = await sb.rpc("edit_dm", { p_id: m.id, p_body: nb });
+        if (error) throw error;
+        toast("メッセージを編集しました");
+        await done();
+      });
+      save.addEventListener("click", doSave);
+      cancel.addEventListener("click", done);
+      ta.addEventListener("keydown", e => {
+        if (e.key === "Enter" && e.shiftKey) { e.preventDefault(); doSave(); }     // Shift+Enter で保存
+        else if (e.key === "Escape") { e.preventDefault(); done(); }
+      });
+      row.replaceChildren(warn, ta, h("div", { class: "dm-edit-actions" }, cancel, save));
+      ta.focus();
+    });
+    return row;
   }
 
   async function viewThread(name, token) {
@@ -1046,7 +1093,8 @@
         .order("created_at", { ascending: true }).limit(500);
       if (error) throw error;
       const stick = box.scrollHeight - box.scrollTop - box.clientHeight < 40 || !box.childElementCount;
-      box.replaceChildren(...(data.length ? data.map(m => dmBubble(m, me)) : [h("p", { class: "muted" }, "まだメッセージはありません。")]));
+      if (box.querySelector(".editing")) return;    // 編集中は、自動更新で入力を消さない
+      box.replaceChildren(...(data.length ? data.map(m => dmBubble(m, me, load)) : [h("p", { class: "muted" }, "まだメッセージはありません。")]));
       if (stick) box.scrollTop = box.scrollHeight;
       if (data.some(m => m.recipient_id === me && !m.read_at)) {
         await sb.rpc("mark_dm_read", { p_with: pf.id });
@@ -1058,7 +1106,8 @@
 
     const ta = h("textarea", { rows: 1, placeholder: isAdmin ? "メッセージを入力（制限なし）" : "メッセージを入力" });
     ta.addEventListener("input", () => { ta.style.height = "auto"; ta.style.height = Math.min(ta.scrollHeight, 140) + "px"; });
-    ta.addEventListener("keydown", e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); form.requestSubmit(); } });
+    // Enter は改行、Shift+Enter で送信
+    ta.addEventListener("keydown", e => { if (e.key === "Enter" && e.shiftKey) { e.preventDefault(); form.requestSubmit(); } });
     const counter = h("span", { class: "muted" }, "");
     const warn = h("div", { class: "dm-warn hidden", role: "alert" });
     const showWarn = msg => { warn.textContent = msg; warn.classList.remove("hidden"); clearTimeout(showWarn.t); showWarn.t = setTimeout(() => warn.classList.add("hidden"), 4000); };
@@ -1071,7 +1120,7 @@
       else if (warn.textContent.startsWith("一回の投稿")) warn.classList.add("hidden");
     });
     let lastSent = 0;
-    const send = h("button", { class: "dm-send", type: "submit", title: "送信（Ctrl+Enter）", "aria-label": "送信" }, "➤");
+    const send = h("button", { class: "dm-send", type: "submit", title: "送信（Shift+Enter）", "aria-label": "送信" }, "➤");
     const form = h("form", { class: "dm-form" }, warn, h("div", { class: "dm-input" }, ta, send), counter);
     form.addEventListener("submit", e => {
       e.preventDefault();
@@ -1131,15 +1180,20 @@
     if (!isAdmin) return h("div", { class: "error-box" }, "管理者だけが見られるページです。");
     const [pa, pb] = await Promise.all([findProfile(a), findProfile(b)]);
     if (!pa || !pb) return h("div", { class: "error-box" }, "ユーザーが見つかりませんでした。");
-    const { data, error } = await sb.from("direct_messages").select(DM_SELECT)
-      .or(`and(sender_id.eq.${pa.id},recipient_id.eq.${pb.id}),and(sender_id.eq.${pb.id},recipient_id.eq.${pa.id})`)
-      .order("created_at", { ascending: true }).limit(500);
-    if (error) throw error;
+    const box = h("div", { class: "dm-box" });
+    async function load() {
+      const { data, error } = await sb.from("direct_messages").select(DM_SELECT)
+        .or(`and(sender_id.eq.${pa.id},recipient_id.eq.${pb.id}),and(sender_id.eq.${pb.id},recipient_id.eq.${pa.id})`)
+        .order("created_at", { ascending: true }).limit(500);
+      if (error) throw error;
+      box.replaceChildren(...(data.length ? data.map(m => dmBubble(m, pa.id, load)) : [h("p", { class: "muted" }, "メッセージはありません。")]));
+    }
+    await load();
     return h("div", { class: "dm-app" },
       h("div", { class: "dm-head" }, h("a", { class: "dm-back", href: "#/messages/all", "aria-label": "戻る" }, "←"),
         avatar(pa.username, "sm"), h("strong", {}, "@" + pa.username), h("span", { class: "muted" }, "と"), avatar(pb.username, "sm"), h("strong", {}, "@" + pb.username),
         h("span", { class: "badge", style: "margin-left:auto" }, "🛡 管理者の閲覧")),
-      h("div", { class: "dm-box" }, ...(data.length ? data.map(m => dmBubble(m, pa.id)) : [h("p", { class: "muted" }, "メッセージはありません。")])));
+      box);
   }
 
   function viewAccount() {
