@@ -319,3 +319,10 @@ iframe.preview { width: 100%; height: 480px; border: 1px solid var(--line); bord
 .dm-row.editing { width: 80%; max-width: 80%; }
 .dm-edit { width: 100%; box-sizing: border-box; border: 1px solid var(--line); border-radius: 12px; padding: .5rem .7rem; font: inherit; resize: vertical; }
 .dm-edit-actions { display: flex; gap: .4rem; justify-content: flex-end; margin-top: .3rem; }
+
+/* プレビューの全画面表示 */
+.preview-wrap { position: relative; background: #fff; }
+.preview-fs { position: absolute; top: .5rem; right: .5rem; z-index: 2; opacity: .92; box-shadow: 0 1px 4px rgba(0,0,0,.25); }
+.preview-wrap:fullscreen { width: 100vw; height: 100vh; background: #fff; }
+.preview-wrap:fullscreen iframe.preview, .preview-wrap.fs-fixed iframe.preview { width: 100%; height: 100vh; border: 0; border-radius: 0; }
+.preview-wrap.fs-fixed { position: fixed; inset: 0; z-index: 3000; width: 100vw; height: 100vh; }
