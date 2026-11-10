@@ -846,7 +846,7 @@
           action = h("span", {}, ver, action);
         }
         tbody.append(h("tr", {},
-          h("td", {}, h("strong", {}, "@" + r.username), r.is_admin ? h("span", { class: "badge open", style: "margin-left:.4rem" }, "管理者") : null),
+          h("td", {}, nameTag(r.username, true), r.is_admin && !adminNames.has(String(r.username).toLowerCase()) ? h("span", { class: "badge open admin-badge" }, "管理者") : null),
           h("td", { class: "mail" }, r.email),
           h("td", {}, dateOnly(r.created_at)),
           h("td", {}, r.email_confirmed ? h("span", { class: "badge open" }, "認証済み") : h("span", { class: "badge" }, "未認証"),
