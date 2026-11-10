@@ -56,6 +56,15 @@
     if (/already requested/i.test(m)) return "すでに公開を要請済みです。作成者の対応をお待ちください。";
     if (/already public/i.test(m)) return "この投稿は、すでに閲覧できる状態です。";
     if (/cannot delete yourself/i.test(m)) return "自分自身のアカウントは削除できません。";
+    if (/approval required/i.test(m)) return "500KBを超えるファイルは、管理者の許可が必要です。";
+    if (/exceeds approved size/i.test(m)) return "許可されたファイルの大きさ（申請の5％増しまで）を超えています。";
+    if (/asset too large/i.test(m)) return "ファイルは1つ3MBまでです。";
+    if (/too many assets/i.test(m)) return "添付できるのは、1投稿につき20ファイルまでです。";
+    if (/duplicate asset/i.test(m)) return "同じ名前のファイルがすでに添付されています。";
+    if (/invalid asset name/i.test(m)) return "ファイル名か、ファイルの種類が使えません（画像・音声のみ。名前に / \\ : * ? \" < > | は使えません）。";
+    if (/invalid asset data/i.test(m)) return "ファイルの中身を読み取れませんでした。";
+    if (/no request needed/i.test(m)) return "500KB以下のファイルは、許可なしで添付できます。";
+    if (/already decided/i.test(m)) return "この要請は、すでに回答されています。";
     if (/not allowed/i.test(m)) return "この操作はできません。";
     if (/message not found/i.test(m)) return "メッセージが見つかりません（削除された可能性があります）。";
     if (/too fast/i.test(m)) return "送信は3秒に1回までです。";
@@ -266,7 +275,7 @@
   async function loadNotifs() {
     if (!session) { notifs = []; bellOpen = false; renderBell(); return; }
     const { data, error } = await sb.from("notifications")
-      .select("id,type,created_at,read_at,project_id,comment_id,request_id,post_id,actor_id,actor:profiles!actor_id(username),project:projects(title),post:posts(title),comment:comments(body),request:big_upload_requests(status,granted,note)")
+      .select("id,type,created_at,read_at,project_id,comment_id,request_id,post_id,actor_id,asset_request_id,actor:profiles!actor_id(username),project:projects(title),post:posts(title),comment:comments(body),request:big_upload_requests(status,granted,note),asset_req:asset_requests!asset_request_id(file_name,size_bytes,status,limit_bytes)")
       .order("created_at", { ascending: false }).limit(30);
     if (error) console.error(error);
     notifs = error ? [] : data;
@@ -279,6 +288,15 @@
     if (n.type === "upload_request") return `${who} さんが大容量投稿（500KB超・最大2MB）を要請しています`;
     if (n.type === "upload_approved") return `大容量投稿が承認されました（最大2MBを${n.request ? n.request.granted : "?"}回まで）`;
     if (n.type === "upload_rejected") return "大容量投稿の要請は承認されませんでした";
+    if (n.type === "asset_request") {
+      const r = n.asset_req;
+      return `${who} さんが、ファイル「${r ? r.file_name : "?"}」（${r ? fmtSize(r.size_bytes) : "?"}）の添付許可を要請しています`;
+    }
+    if (n.type === "asset_approved") {
+      const r = n.asset_req;
+      return `ファイル「${r ? r.file_name : "?"}」の添付が許可されました（${r ? fmtSize(r.limit_bytes) : "?"}まで）。投稿フォームで、もう一度そのファイルを選んでください`;
+    }
+    if (n.type === "asset_rejected") return `ファイル「${n.asset_req ? n.asset_req.file_name : "?"}」の添付は許可されませんでした`;
     if (n.type === "verify_request") return `${who} さんが、メール認証（アカウントの認証）を要請しています`;
     if (n.type === "publish_request") return `${who} さんが、あなたの投稿「${n.post ? n.post.title : ""}」の公開を要請しています`;
     return n.type === "reply"
@@ -321,6 +339,7 @@
       if (n.type === "upload_request") content = requestItem(n);
       else if (n.type === "publish_request") content = publishItem(n);
       else if (n.type === "verify_request") content = verifyItem(n);
+      else if (n.type === "asset_request") content = assetRequestItem(n);
       else {
         content = h("button", { class: "bell-item" + (n.read_at ? "" : " unread"), type: "button" },
           h("div", { class: "t" }, notifText(n)),
@@ -342,7 +361,8 @@
 
   // 回答待ちの大容量投稿の要請は、回答するまで削除できない
   function deletable(n) {
-    return !(n.type === "upload_request" && n.request && n.request.status === "pending");
+    return !(n.type === "upload_request" && n.request && n.request.status === "pending")
+        && !(n.type === "asset_request" && n.asset_req && n.asset_req.status === "pending");
   }
 
   async function deleteNotif(n) {
@@ -379,6 +399,32 @@
     const open = h("button", { class: "btn small", type: "button" }, "投稿を開く");
     open.addEventListener("click", () => { markRead(n); bellOpen = false; renderBell(); go(`#/post/${n.post_id}`); });
     box.append(h("div", { class: "bell-req-actions" }, allow, open));
+    return box;
+  }
+
+  // 管理者向け：500KBを超えるファイルの添付許可（ファイルごと）
+  function assetRequestItem(n) {
+    const r = n.asset_req;
+    const box = h("div", { class: "bell-item req" + (n.read_at ? "" : " unread") },
+      h("div", { class: "t" }, notifText(n)),
+      h("div", { class: "d" }, fmtDate(n.created_at)));
+    if (!r) return box;
+    if (r.status === "pending") {
+      const ok = h("button", { class: "btn small primary", type: "button" }, `許可（${fmtSize(Math.ceil(r.size_bytes * 1.05))}まで）`);
+      const no = h("button", { class: "btn small danger", type: "button" }, "却下");
+      const decide = (approve, btn) => busy(btn, async () => {
+        const { error } = await sb.rpc("decide_asset_request", { p_id: n.asset_request_id, p_approve: approve });
+        if (error) throw error;
+        markRead(n);
+        toast(approve ? "添付を許可しました" : "却下しました");
+        await loadNotifs();
+      });
+      ok.addEventListener("click", () => decide(true, ok));
+      no.addEventListener("click", () => decide(false, no));
+      box.append(h("div", { class: "bell-req-actions" }, ok, no));
+    } else {
+      box.append(h("div", { class: "ex" }, r.status === "rejected" ? "× 却下済み" : "✓ 許可済み"));
+    }
     return box;
   }
 
@@ -452,7 +498,7 @@
   function openNotif(n) {
     markRead(n);
     // 大容量投稿の承認・却下の通知は、既読にするだけ（移動しない）
-    if (!n.project_id) { renderBell(); return; }
+    if (!n.project_id) { renderBell(); return; }   // 承認・却下・要請の通知は、既読にするだけ
     bellOpen = false;
     renderBell();
     const target = `#/project/${n.project_id}`;
@@ -515,6 +561,42 @@
     });
   }
 
+  /* ======================================================
+   * 添付ファイル（画像・音声）
+   * ==================================================== */
+  const ASSET_FREE = 500000;       // 許可なしで添付できる大きさ
+  const ASSET_MAX = 3000000;       // 1ファイルの上限
+  const ASSET_COUNT_MAX = 20;      // 1投稿あたりの数
+  const ASSET_EXT = /\.(png|jpe?g|gif|webp|bmp|ico|avif|mp3|wav|ogg|m4a|aac|flac|opus)$/i;
+  const assetNameOk = n => !!n && n.length <= 100 && !/[\\/:*?"<>|\u0000-\u001f]/.test(n) && !/^\./.test(n) && ASSET_EXT.test(n);
+  const fmtSize = b => b >= 1000000 ? (b / 1000000).toFixed(2) + "MB" : Math.max(1, Math.round(b / 1000)) + "KB";
+  const isAudioName = n => /\.(mp3|wav|ogg|m4a|aac|flac|opus)$/i.test(n);
+
+  function fileToB64(file) {
+    return new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(String(r.result).split(",")[1] || "");
+      r.onerror = () => reject(new Error("ファイルを読み込めませんでした。"));
+      r.readAsDataURL(file);
+    });
+  }
+  const dataUri = (mime, b64) => `data:${mime};base64,${b64}`;
+  const b64ToBytes = b64 => Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+
+  // HTML / CSS / JS の中の「ファイル名」を、データURIに置き換える（プレビュー用）。
+  // 例：<img src="photo.png"> や url(./photo.png)、new Audio('sound.mp3')
+  function inlineAssets(text, assets) {
+    let out = text;
+    (assets || []).forEach(a => {
+      const esc = a.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const re = new RegExp("(?<![\\w./%-])(?:\\./)?" + esc + "(?![\\w-])", "g");
+      const uri = dataUri(a.mime, a.b64);
+      out = out.replace(re, () => uri);
+    });
+    return out;
+  }
+  const previewDoc = (p, assets) => inlineAssets(compose(p, false), assets);
+
   // プレビューの全画面表示（全画面 API が使えない端末では、画面いっぱいの重ね表示にする）
   function previewWithFullscreen(doc) {
     const wrap = h("div", { class: "preview-wrap", tabindex: "-1" });
@@ -554,12 +636,14 @@
     download(safeName(p.title) + ".html", new Blob([compose(p, false)], { type: "text/html;charset=utf-8" }));
   }
 
-  async function downloadPostZip(p) {
+  async function downloadPostZip(p, assets) {
     const zip = new JSZip();
     zip.file("index.html", compose(p, true));
     if (p.css) zip.file("style.css", p.css);
     if (p.js) zip.file("script.js", p.js);
     if (p.memo) zip.file("memo.txt", p.memo);
+    // 添付ファイルは index.html と同じ場所に入れる（<img src="photo.png"> のまま参照できる）
+    (assets || []).forEach(a => zip.file(a.name, b64ToBytes(a.b64)));
     download(safeName(p.title) + ".zip", await zip.generateAsync({ type: "blob" }));
   }
 
@@ -568,6 +652,7 @@
     const { data, error } = await sb.rpc("get_project_posts", { p_project: project.id });
     if (error) throw error;
     if (!data.length) { toast(total ? "ダウンロードできる投稿がありません（限定公開のため）" : "まだ投稿がありません", true); return; }
+    const { data: assetRows } = await sb.rpc("get_project_assets", { p_project: project.id });
     const zip = new JSZip();
     data.forEach((p, i) => {
       const dir = zip.folder(String(i + 1).padStart(2, "0") + "_" + safeName(p.title));
@@ -575,6 +660,7 @@
       if (p.css) dir.file("style.css", p.css);
       if (p.js) dir.file("script.js", p.js);
       if (p.memo) dir.file("memo.txt", p.memo);
+      (assetRows || []).filter(a => a.post_id === p.id).forEach(a => dir.file(a.name, b64ToBytes(a.b64)));
     });
     download(safeName(project.title) + ".zip", await zip.generateAsync({ type: "blob" }));
     if (total && data.length < total) toast(`限定公開の${total - data.length}件は、閲覧できないため含まれていません`);
@@ -1641,6 +1727,12 @@
     const canEditProject = isOwner || !!(project.myCollab && project.myCollab.can_edit_settings);
     const canSeeLimited = isOwner || !!(project.myCollab && project.myCollab.can_view_limited);
     const myViewable = new Set((myViewRes.data || []).map(v => v.post_id));
+    // 添付ファイル（画像・音声）のある投稿
+    const hasAssets = new Set();
+    if (posts.length) {
+      const ar = await sb.from("post_assets").select("post_id").in("post_id", posts.map(p => p.id));
+      (ar.data || []).forEach(a => hasAssets.add(a.post_id));
+    }
     // 画面の出し分け用（実際にコードが渡されるかどうかは、データベース側が判定する）
     const canSee = p => p.is_public !== false || (!!session && (p.author_id === session.user.id || canSeeLimited || myViewable.has(p.id)));
 
@@ -1701,6 +1793,16 @@
         const dlOk = p.is_public === false || p.allow_download !== false || (!!session && (p.author_id === session.user.id || isOwner || !!project.myCollab));
         if (visible && !dlOk) {
           dlBtn = h("span", { class: "badge", title: "投稿者がダウンロードを許可していません" }, "⬇ ダウンロード不可");
+        } else if (visible && hasAssets.has(p.id)) {
+          // 添付ファイルがある投稿は、ZIPだけ
+          dlBtn = h("button", { class: "btn small", type: "button" }, "⬇ ZIPでダウンロード");
+          dlBtn.addEventListener("click", () => busy(dlBtn, async () => {
+            const [pr, ar] = await Promise.all([sb.rpc("get_post", { p_id: p.id }), sb.rpc("get_post_assets", { p_post: p.id })]);
+            if (pr.error) throw pr.error;
+            if (!pr.data || !pr.data.can_view) throw new Error("この投稿は限定公開のため、ダウンロードできません。");
+            if (!pr.data.can_download) throw new Error("この投稿は、投稿者がダウンロードを許可していません。");
+            await downloadPostZip(pr.data, ar.data || []);
+          }));
         } else if (visible) {
           dlBtn = h("button", { class: "btn small", type: "button" }, "⬇ htmlとしてダウンロード");
           dlBtn.addEventListener("click", () => busy(dlBtn, async () => {
@@ -1732,7 +1834,7 @@
           pick,
           h("div", { class: "info" },
             h("h3", {}, h("a", { href: `#/post/${p.id}` }, p.title), p.is_public === false ? h("span", { class: "badge lock", style: "margin-left:.5rem" }, visible ? "🔒 限定公開" : "🔒 限定公開（閲覧不可）") : null),
-            h("div", { class: "meta" }, nameTag(p.author && p.author.username), h("span", {}, fmtDate(p.created_at)))),
+            h("div", { class: "meta" }, nameTag(p.author && p.author.username), h("span", {}, fmtDate(p.created_at)), hasAssets.has(p.id) ? h("span", { title: "画像・音声の添付あり" }, "📎 添付あり") : null)),
           h("div", { class: "actions" },
             h("a", { class: "btn small", href: `#/post/${p.id}` }, "開く"),
             dlBtn)));
@@ -1765,6 +1867,139 @@
   }
   function notFound() {
     return h("div", { class: "card" }, h("h2", {}, "見つかりませんでした"), h("a", { href: "#/" }, "トップへ戻る"));
+  }
+
+  // 投稿フォームの「画像・音声の添付」欄
+  function assetPicker(post) {
+    const node = h("div", { class: "assets-box" });
+    const existing = [];     // 保存済みの添付（{id,name,mime,size}）
+    let existingFull = [];   // プレビュー用（中身つき）
+    const picks = [];        // これから添付するファイル（{file,name,size,req}）
+    let myReqs = [];
+    const list = h("div", { class: "asset-list" });
+    const input = h("input", { type: "file", multiple: true, accept: "image/*,audio/*,.png,.jpg,.jpeg,.gif,.webp,.bmp,.ico,.avif,.mp3,.wav,.ogg,.m4a,.aac,.flac,.opus" });
+
+    async function loadReqs() {
+      const { data } = await sb.from("asset_requests").select("id,file_name,size_bytes,status,limit_bytes")
+        .eq("user_id", session.user.id).order("created_at", { ascending: false });
+      myReqs = data || [];
+    }
+    // ファイルの状態：ok / approved / pending / rejected / need / bad
+    function stateOf(it) {
+      const dup = existing.some(e => e.name === it.name) || picks.some(p => p !== it && p.name === it.name);
+      if (!assetNameOk(it.name)) return { kind: "bad", text: "使えないファイル名か、種類です（画像・音声のみ。名前に / \\ : * ? \" < > | は使えません）" };
+      if (dup) return { kind: "bad", text: "同じ名前のファイルがあります" };
+      if (it.size > ASSET_MAX) return { kind: "bad", text: "1ファイル3MBまでです" };
+      if (it.size <= ASSET_FREE || isAdmin) return { kind: "ok" };
+      const appr = myReqs.find(r => r.status === "approved" && r.file_name === it.name && it.size <= r.limit_bytes
+        && !picks.some(p => p !== it && p.req && p.req.id === r.id));
+      if (appr) return { kind: "approved", req: appr };
+      if (myReqs.some(r => r.status === "pending" && r.file_name === it.name && r.size_bytes === it.size)) return { kind: "pending" };
+      const rej = myReqs.find(r => r.status === "rejected" && r.file_name === it.name && r.size_bytes === it.size);
+      return { kind: rej ? "rejected" : "need" };
+    }
+
+    function draw() {
+      list.replaceChildren();
+      existing.forEach(a => {
+        const del = h("button", { class: "btn small danger", type: "button" }, "削除");
+        del.addEventListener("click", () => {
+          if (!confirm(`「${a.name}」を削除します。よろしいですか？`)) return;
+          busy(del, async () => {
+            const { error } = await sb.from("post_assets").delete().eq("id", a.id);
+            if (error) throw error;
+            existing.splice(existing.indexOf(a), 1);
+            existingFull = existingFull.filter(x => x.id !== a.id);
+            draw();
+          });
+        });
+        list.append(h("div", { class: "asset-row" },
+          h("span", { class: "asset-fname" }, "📎 " + a.name), h("span", { class: "muted" }, fmtSize(a.size)),
+          h("span", { class: "badge open" }, "添付済み"), del));
+      });
+      picks.forEach(it => {
+        const st = stateOf(it);
+        it.req = st.kind === "approved" ? st.req : null;
+        const rm = h("button", { class: "btn small", type: "button" }, "外す");
+        rm.addEventListener("click", () => { picks.splice(picks.indexOf(it), 1); draw(); });
+        const right = [];
+        if (st.kind === "ok") right.push(h("span", { class: "badge open" }, "OK"));
+        if (st.kind === "approved") right.push(h("span", { class: "badge open" }, `✓ 管理者が許可済み（${fmtSize(st.req.limit_bytes)}まで）`));
+        if (st.kind === "pending") right.push(h("span", { class: "badge" }, "⏳ 管理者の許可待ち"));
+        if (st.kind === "bad") right.push(h("span", { class: "badge lock" }, st.text));
+        if (st.kind === "need" || st.kind === "rejected") {
+          const ask = h("button", { class: "btn small primary", type: "button" }, "管理者に許可を要請");
+          ask.addEventListener("click", () => busy(ask, async () => {
+            const { error } = await sb.rpc("request_asset_upload", { p_name: it.name, p_size: it.size });
+            if (error) throw error;
+            await loadReqs();
+            toast("管理者に許可を要請しました。許可されると通知が届きます");
+            draw();
+          }));
+          right.push(st.kind === "rejected" ? h("span", { class: "badge lock" }, "却下されました") : h("span", { class: "badge" }, "500KB超：管理者の許可が必要"), ask);
+        }
+        list.append(h("div", { class: "asset-row" },
+          h("span", { class: "asset-fname" }, "🆕 " + it.name), h("span", { class: "muted" }, fmtSize(it.size)), ...right, rm));
+      });
+      if (!existing.length && !picks.length) list.append(h("p", { class: "muted", style: "margin:.3rem 0" }, "添付ファイルはありません。"));
+    }
+
+    input.addEventListener("change", () => {
+      [...input.files].forEach(f => {
+        if (existing.length + picks.length >= ASSET_COUNT_MAX) { toast(`添付できるのは、1投稿につき${ASSET_COUNT_MAX}ファイルまでです`, true); return; }
+        picks.push({ file: f, name: f.name, size: f.size, req: null });
+      });
+      input.value = "";
+      draw();
+    });
+
+    node.append(
+      h("h3", {}, "📎 画像・音声ファイルの添付（任意）"),
+      h("p", { class: "muted", style: "margin:.2rem 0 .6rem" },
+        "png / jpg / gif / webp、mp3 / wav / ogg などを添付できます。HTMLの中では、ファイル名のまま書けば参照されます（例：",
+        h("code", {}, '<img src="photo.png">'), "）。1ファイル500KBまではそのまま添付できます。500KBを超えるファイルは、ファイルごとに管理者の許可が必要です（申請した大きさの5％増しまで・最大3MB）。添付ファイルがある投稿は、ダウンロードがZIPだけになります。"),
+      input, list);
+    draw();
+    // 保存済みの添付と、自分の要請の状況を読み込む
+    if (session) {
+      loadReqs().then(draw);
+      if (post) {
+        sb.from("post_assets").select("id,name,mime,size").eq("post_id", post.id).order("created_at").then(r => { (r.data || []).forEach(a => existing.push(a)); draw(); });
+        sb.rpc("get_post_assets", { p_post: post.id }).then(r => { existingFull = r.data || []; });
+      }
+    }
+
+    return {
+      node,
+      count: () => picks.length,
+      // 保存前の確認：許可が必要なファイルが残っていないか
+      validate() {
+        for (const it of picks) {
+          const st = stateOf(it);
+          if (st.kind === "bad") throw new Error(`添付ファイル「${it.name}」：${st.text}`);
+          if (st.kind === "pending") throw new Error(`「${it.name}」は、管理者の許可待ちです。許可されると通知が届きます。それまでは、そのファイルを外して投稿してください。`);
+          if (st.kind === "need" || st.kind === "rejected") throw new Error(`「${it.name}」は500KBを超えています。「管理者に許可を要請」を押すか、そのファイルを外してください。`);
+        }
+      },
+      // 投稿を保存したあとに、ファイルを1つずつ添付する
+      async uploadAll(postId) {
+        for (const it of picks) {
+          const st = stateOf(it);
+          const b64 = await fileToB64(it.file);
+          const { error } = await sb.rpc("add_post_asset", { p_post: postId, p_name: it.name, p_b64: b64, p_request: st.kind === "approved" ? st.req.id : null });
+          if (error) throw Object.assign(new Error(`「${it.name}」を添付できませんでした：${friendly(error)}`), { assetFail: true });
+        }
+      },
+      // プレビュー用：保存済み＋これから添付するファイル（中身つき）
+      async previewAssets() {
+        const fresh = [];
+        for (const it of picks) {
+          if (!assetNameOk(it.name) || it.size > ASSET_MAX) continue;
+          fresh.push({ name: it.name, mime: it.file.type || "application/octet-stream", b64: await fileToB64(it.file) });
+        }
+        return [...existingFull.filter(e => !fresh.some(f => f.name === e.name)), ...fresh];
+      }
+    };
   }
 
   function postForm(project, post) {
@@ -1853,11 +2088,13 @@
     }
 
     const previewBox = h("div", { class: "preview-box hidden" });
+    const assetsUI = assetPicker(post);
     const prevBtn = h("button", { class: "btn", type: "button" }, "▶ プレビュー");
-    prevBtn.addEventListener("click", () => {
+    prevBtn.addEventListener("click", () => busy(prevBtn, async () => {
+      const as = await assetsUI.previewAssets();
       previewBox.classList.remove("hidden");
-      previewBox.replaceChildren(previewFrame(compose({ title: title.value, html: html.value, css: css.value, js: js.value }, false)));
-    });
+      previewBox.replaceChildren(previewFrame(previewDoc({ title: title.value, html: html.value, css: css.value, js: js.value }, as)));
+    }));
 
     /* ---- 入力方法の切り替え（コード入力 / ファイル添付） ---- */
     const codeFields = h("div", {},
@@ -1937,6 +2174,7 @@
           : "各500KBまで。超える場合は、管理者に要請できます（承認されると最大2MBまで）。"),
       field("タイトル", title),
       modeTabs, codeFields, fileBox,
+      assetsUI.node,
       publicRow, dlRow, limitedBox,
       field("メモ（任意）", memo, "改善した点・変更点・使い方などを自由に書けます（2000文字まで）。投稿ページに表示されます。"),
       bigBox,
@@ -1956,6 +2194,7 @@
             throw new Error(`${k.toUpperCase()} が500KBを超えています。管理者の承認が必要です（下の「要請」から申請できます）。`);
           }
         }
+        assetsUI.validate();
         // 承認済みの回数を使う投稿（すでに大容量の投稿の編集は消費しない）
         const isBigNow = ["html", "css", "js"].some(k => row[k].length > NORMAL_MAX);
         if (isBigNow && !isAdmin && !wasBig && !confirm(`500KBを超える投稿です。大容量投稿の残り回数（${bigQuota}回）を1回消費します。よろしいですか？`)) return;
@@ -1977,6 +2216,8 @@
           const { error } = await sb.from("posts").update({ ...row, updated_at: new Date().toISOString() }).eq("id", post.id);
           if (error) throw error;
           await syncViewers(post.id);
+          try { await assetsUI.uploadAll(post.id); }
+          catch (e) { if (!e.assetFail) throw e; toast(e.message, true); route(); return; }
           toast("保存しました");
           go(`#/post/${post.id}`);
         } else {
@@ -1986,6 +2227,14 @@
           if (error) throw error;
           if (isBigNow && !isAdmin) await refreshQuota();
           await syncViewers(newId);
+          try { await assetsUI.uploadAll(newId); }
+          catch (e) {
+            if (!e.assetFail) throw e;
+            // 投稿そのものは保存済み。添付できなかったファイルは、編集画面から追加し直す
+            toast(e.message + "（投稿は保存されています。編集から添付し直してください）", true);
+            go(`#/post/${newId}/edit`);
+            return;
+          }
           toast("投稿しました");
           go(`#/post/${newId}`);
         }
@@ -2090,13 +2339,18 @@
             req)));
     }
 
+    // 添付ファイル（画像・音声）
+    const { data: assetData } = await sb.rpc("get_post_assets", { p_post: id });
+    const assets = assetData || [];
+
     const htmlBtn = h("button", { class: "btn", type: "button" }, "⬇ HTML（1ファイル）");
     htmlBtn.addEventListener("click", () => downloadSingleHtml(post));
-    const zipBtn = h("button", { class: "btn", type: "button" }, "⬇ ZIP（分割）");
-    zipBtn.addEventListener("click", () => busy(zipBtn, () => downloadPostZip(post)));
+    const zipBtn = h("button", { class: "btn", type: "button" }, assets.length ? "⬇ ZIPでダウンロード（画像・音声つき）" : "⬇ ZIP（分割）");
+    zipBtn.addEventListener("click", () => busy(zipBtn, () => downloadPostZip(post, assets)));
 
     const actions = h("div", { class: "actions" });
-    if (post.can_download !== false) actions.append(htmlBtn, zipBtn);
+    // 添付ファイルがあるときは、HTMLが参照できるように、ZIPだけを出す
+    if (post.can_download !== false) actions.append(...(assets.length ? [zipBtn] : [htmlBtn, zipBtn]));
     else actions.append(h("span", { class: "badge", title: "投稿者がダウンロードを許可していません" }, "⬇ ダウンロード不可"));
     if (isAuthor) {
       actions.append(h("a", { class: "btn", href: `#/post/${id}/edit` }, "編集"));
@@ -2140,7 +2394,7 @@
 
     // タブ（プレビュー / HTML / CSS / JS）
     const panels = {
-      preview: previewWithFullscreen(compose(post, false)),
+      preview: previewWithFullscreen(previewDoc(post, assets)),
       html: h("pre", { class: "codeview" }, post.html || "（なし）"),
       css: h("pre", { class: "codeview" }, post.css || "（なし）"),
       js: h("pre", { class: "codeview" }, post.js || "（なし）")
@@ -2171,7 +2425,16 @@
           h("h3", {}, "📝 投稿者のメモ"),
           h("p", {}, post.memo)) : null,
         h("p", { class: "notice" }, "投稿者が書いたコードです。プレビューは隔離された領域で実行されています。ダウンロードしたコードは、内容を確認してから実行してください。"),
-        tabs, body),
+        tabs, body,
+        assets.length ? h("div", { class: "assets-box" },
+          h("h3", {}, `📎 添付ファイル（${assets.length}）`),
+          h("p", { class: "muted", style: "margin:.2rem 0 .6rem" }, "HTMLの中では、ファイル名のまま参照できます（例：", h("code", {}, `<img src="${assets[0].name}">`), "）。"),
+          h("div", { class: "asset-grid" }, ...assets.map(a => h("div", { class: "asset-card" },
+            isAudioName(a.name)
+              ? h("audio", { controls: true, preload: "none", src: dataUri(a.mime, a.b64) })
+              : h("img", { src: dataUri(a.mime, a.b64), alt: a.name, loading: "lazy" }),
+            h("div", { class: "asset-name" }, a.name),
+            h("div", { class: "muted" }, fmtSize(a.size)))))) : null),
       (post.is_public === false && (isAuthor || isOwner)) ? viewersBox(post) : null);
   }
 
