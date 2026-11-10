@@ -53,8 +53,8 @@
     if (/already requested/i.test(m)) return "すでに公開を要請済みです。作成者の対応をお待ちください。";
     if (/already public/i.test(m)) return "この投稿は、すでに閲覧できる状態です。";
     if (/cannot delete yourself/i.test(m)) return "自分自身のアカウントは削除できません。";
-    if (/too fast/i.test(m)) return "送信が速すぎます。3秒ほどおいてから送ってください。";
-    if (/message too long/i.test(m)) return "メッセージは200文字までです。";
+    if (/too fast/i.test(m)) return "送信は3秒に1回までです。";
+    if (/message too long/i.test(m)) return "一回の投稿で200文字までです。";
     if (/empty message/i.test(m)) return "メッセージを入力してください。";
     if (/invalid recipient/i.test(m)) return "この相手には送れません。";
     if (/account frozen/i.test(m)) return "アカウントが一時凍結されています。メール認証を完了すると、また使えるようになります。";
@@ -231,7 +231,8 @@
       // append(null) は「null」という文字が入ってしまうので、使わない要素は配列から除く
       navEl.append(...[
         h("a", { class: "who", href: "#/account", title: "ユーザー名の変更" }, profile ? `@${profile.username}` : "", isAdmin ? h("span", { class: "badge open", style: "margin-left:.4rem" }, "管理者") : null),
-        h("a", { class: "btn small", href: "#/messages" }, "💬 メッセージ" + (dmUnread ? ` (${dmUnread})` : "")),
+        h("a", { class: "btn small nav-dm", href: "#/messages", title: dmUnread ? `未読メッセージ ${dmUnread}件` : "メッセージ" },
+          "💬 メッセージ", dmUnread ? h("span", { class: "nav-badge" }, dmUnread > 99 ? "99+" : String(dmUnread)) : null),
         isAdmin ? h("a", { class: "btn small", href: "#/admin" }, "👤 ユーザー管理") : null,
         h("a", { class: "btn small primary", href: "#/new-project" }, "＋ 企画を作る"),
         h("button", {
@@ -452,6 +453,13 @@
   document.addEventListener("click", () => { if (bellOpen) { bellOpen = false; renderBell(); } });
   document.addEventListener("keydown", e => { if (e.key === "Escape" && bellOpen) { bellOpen = false; renderBell(); } });
   setInterval(() => { if (session && !document.hidden) loadNotifs(); }, 60000);
+  // 新着メッセージの数（右上の「メッセージ」ボタンの数字）を、20秒ごとに更新
+  setInterval(async () => {
+    if (!session || document.hidden) return;
+    const before = dmUnread;
+    await refreshDmUnread();
+    if (before !== dmUnread) renderNav();
+  }, 20000);
 
   /* ======================================================
    * コードの組み立て（プレビュー / ダウンロード共通）
@@ -970,9 +978,19 @@
   /* ======================================================
    * メッセージ（DM）
    * ==================================================== */
+  // 頭文字の丸アイコン（名前ごとに色が決まる）
+  function avatar(name, size) {
+    let hsh = 0; for (const ch of String(name)) hsh = (hsh * 31 + ch.charCodeAt(0)) % 360;
+    return h("span", { class: "avatar" + (size ? " " + size : ""), style: `background:hsl(${hsh},55%,48%)`, "aria-hidden": "true" },
+      String(name).charAt(0).toUpperCase());
+  }
+  const dmTime = iso => {
+    const d = new Date(iso), now = new Date();
+    const hm = d.toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" });
+    return d.toDateString() === now.toDateString() ? hm : `${d.getMonth() + 1}/${d.getDate()} ${hm}`;
+  };
   const DM_SELECT = "id,sender_id,recipient_id,body,created_at,read_at,sender:profiles!sender_id(username),recipient:profiles!recipient_id(username)";
-  const dmNotice = () => h("div", { class: "notice" }, "🗑 メッセージは、送ってから1週間で自動的に削除されます。" +
-    "🛡 管理者は、すべてのメッセージを確認できます。連投防止のため、送信は3秒に1回、1通200文字までです。");
+  const dmNotice = () => h("p", { class: "muted dm-note" }, "メッセージは1週間で自動削除されます");
 
   async function viewMessages() {
     if (!session) return needLogin("メッセージを使うにはログインが必要です。");
@@ -994,23 +1012,25 @@
     });
     const list = h("div", { class: "list" });
     if (!convs.size) list.append(h("p", { class: "muted" }, "メッセージはまだありません。ユーザーのプロフィールか、上の検索から送れます。"));
-    convs.forEach(c => list.append(h("a", { class: "card post-item dm-conv", href: `#/messages/${encodeURIComponent(c.name)}` },
-      h("strong", {}, "@" + c.name), c.unread ? h("span", { class: "badge open", style: "margin-left:.4rem" }, `未読 ${c.unread}`) : null,
-      h("div", { class: "muted dm-preview" }, (c.last.sender_id === me ? "あなた：" : "") + c.last.body),
-      h("div", { class: "muted", style: "font-size:.8rem" }, fmtDate(c.last.created_at)))));
+    convs.forEach(c => list.append(h("a", { class: "dm-conv" + (c.unread ? " unread" : ""), href: `#/messages/${encodeURIComponent(c.name)}` },
+      avatar(c.name),
+      h("div", { class: "dm-conv-main" },
+        h("div", { class: "dm-conv-top" }, h("strong", {}, c.name), h("span", { class: "dm-conv-time" }, dmTime(c.last.created_at))),
+        h("div", { class: "dm-preview" }, (c.last.sender_id === me ? "あなた：" : "") + c.last.body)),
+      c.unread ? h("span", { class: "dm-dot", title: `未読 ${c.unread}` }, String(c.unread)) : null)));
     return h("div", {},
       h("h1", {}, "💬 メッセージ"),
       dmNotice(),
       isAdmin ? h("p", {}, h("a", { class: "btn small", href: "#/messages/all" }, "🛡 すべてのメッセージを見る（管理者）")) : null,
-      h("div", { class: "card" }, picker.node),
-      list);
+      h("div", { class: "dm-new" }, picker.node),
+      h("div", { class: "dm-list" }, list));
   }
 
   function dmBubble(m, meId) {
     const mine = m.sender_id === meId;
     return h("div", { class: "dm-row" + (mine ? " mine" : "") },
       h("div", { class: "dm-bubble" }, m.body),
-      h("div", { class: "dm-time" }, (mine ? "" : "@" + (m.sender ? m.sender.username : "?") + "　") + fmtDate(m.created_at)));
+      h("div", { class: "dm-time" }, (m.sender && !mine ? m.sender.username + "・" : "") + dmTime(m.created_at)));
   }
 
   async function viewThread(name, token) {
@@ -1036,31 +1056,47 @@
     await load();
     dmTimer = setInterval(() => { if (token === renderToken && !document.hidden) load().catch(() => {}); }, 8000);
 
-    const ta = h("textarea", { rows: 3, placeholder: isAdmin ? "メッセージ（管理者は文字数の制限なし）" : "メッセージ（200文字まで）" });
-    if (!isAdmin) ta.maxLength = 200;
-    const counter = h("span", { class: "muted" }, isAdmin ? "" : "0 / 200");
-    ta.addEventListener("input", () => { if (!isAdmin) counter.textContent = `${ta.value.length} / 200`; });
-    const send = h("button", { class: "btn primary", type: "submit" }, "送信");
-    const form = h("form", { class: "dm-form" }, ta, h("div", { class: "dm-form-row" }, counter, send));
+    const ta = h("textarea", { rows: 1, placeholder: isAdmin ? "メッセージを入力（制限なし）" : "メッセージを入力" });
+    ta.addEventListener("input", () => { ta.style.height = "auto"; ta.style.height = Math.min(ta.scrollHeight, 140) + "px"; });
+    ta.addEventListener("keydown", e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); form.requestSubmit(); } });
+    const counter = h("span", { class: "muted" }, "");
+    const warn = h("div", { class: "dm-warn hidden", role: "alert" });
+    const showWarn = msg => { warn.textContent = msg; warn.classList.remove("hidden"); clearTimeout(showWarn.t); showWarn.t = setTimeout(() => warn.classList.add("hidden"), 4000); };
+    ta.addEventListener("input", () => {
+      if (isAdmin) return;
+      const over = ta.value.length > 200;
+      counter.textContent = ta.value.length ? `${ta.value.length} / 200` : "";
+      counter.classList.toggle("over", over);
+      if (over) { warn.textContent = "一回の投稿で200文字までです"; warn.classList.remove("hidden"); }
+      else if (warn.textContent.startsWith("一回の投稿")) warn.classList.add("hidden");
+    });
+    let lastSent = 0;
+    const send = h("button", { class: "dm-send", type: "submit", title: "送信（Ctrl+Enter）", "aria-label": "送信" }, "➤");
+    const form = h("form", { class: "dm-form" }, warn, h("div", { class: "dm-input" }, ta, send), counter);
     form.addEventListener("submit", e => {
       e.preventDefault();
-      let sent = false;
       busy(send, async () => {
         const body = ta.value.trim();
-        if (!body) throw new Error("メッセージを入力してください。");
+        if (!body) return;
+        if (!isAdmin && body.length > 200) { showWarn("一回の投稿で200文字までです"); return; }
+        if (!isAdmin && Date.now() - lastSent < 3000) { showWarn("送信は3秒に1回までです"); return; }
         const { error } = await sb.rpc("send_dm", { p_to: pf.id, p_body: body });
-        if (error) throw error;
-        ta.value = ""; counter.textContent = isAdmin ? "" : "0 / 200";
+        if (error) {
+          if (/too fast/i.test(error.message)) { showWarn("送信は3秒に1回までです"); return; }
+          if (/too long/i.test(error.message)) { showWarn("一回の投稿で200文字までです"); return; }
+          throw error;
+        }
+        lastSent = Date.now();
+        ta.value = ""; ta.style.height = "auto"; counter.textContent = ""; counter.classList.remove("over"); warn.classList.add("hidden");
         await load(); box.scrollTop = box.scrollHeight;
-        sent = true;
-      }).then(() => {
-        if (sent && !isAdmin) { send.disabled = true; setTimeout(() => { send.disabled = false; }, 3000); }   // 連投防止（3秒）
       });
     });
-    return h("div", {},
-      h("p", {}, h("a", { href: "#/messages" }, "← メッセージ一覧")),
-      h("h1", {}, h("span", {}, "💬 "), nameTag(pf.username, true)),
-      dmNotice(), box, form);
+    return h("div", { class: "dm-app" },
+      h("div", { class: "dm-head" },
+        h("a", { class: "dm-back", href: "#/messages", "aria-label": "メッセージ一覧へ戻る" }, "←"),
+        avatar(pf.username, "sm"), nameTag(pf.username, true)),
+      box, form,
+      h("p", { class: "dm-foot muted" }, "メッセージは1週間で自動削除されます"));
   }
 
   // 管理者：すべてのメッセージ
@@ -1077,16 +1113,18 @@
       if (!rows.length) list.append(h("p", { class: "muted" }, "該当するメッセージがありません。"));
       rows.forEach(m => {
         const a = m.sender ? m.sender.username : "?", b = m.recipient ? m.recipient.username : "?";
-        list.append(h("a", { class: "card post-item dm-conv", href: `#/dm/${encodeURIComponent(a)}/${encodeURIComponent(b)}` },
-          h("strong", {}, `@${a} → @${b}`), h("span", { class: "muted" }, "　" + fmtDate(m.created_at)),
-          h("div", { class: "dm-preview" }, m.body)));
+        list.append(h("a", { class: "dm-conv", href: `#/dm/${encodeURIComponent(a)}/${encodeURIComponent(b)}` },
+          avatar(a),
+          h("div", { class: "dm-conv-main" },
+            h("div", { class: "dm-conv-top" }, h("strong", {}, `${a} → ${b}`), h("span", { class: "dm-conv-time" }, dmTime(m.created_at))),
+            h("div", { class: "dm-preview" }, m.body))));
       });
     }
     q.addEventListener("input", draw);
     draw();
     return h("div", {}, h("p", {}, h("a", { href: "#/messages" }, "← メッセージ一覧")),
       h("h1", {}, "🛡 すべてのメッセージ（管理者）"),
-      h("p", { class: "muted" }, "直近1週間・最新500件まで。クリックすると、その2人のやり取りを開きます。"), q, list);
+      h("p", { class: "muted" }, "直近1週間・最新500件まで。クリックすると、その2人のやり取りを開きます。"), q, h("div", { class: "dm-list" }, list));
   }
 
   async function viewDmPair(a, b) {
@@ -1097,8 +1135,10 @@
       .or(`and(sender_id.eq.${pa.id},recipient_id.eq.${pb.id}),and(sender_id.eq.${pb.id},recipient_id.eq.${pa.id})`)
       .order("created_at", { ascending: true }).limit(500);
     if (error) throw error;
-    return h("div", {}, h("p", {}, h("a", { href: "#/messages/all" }, "← すべてのメッセージ")),
-      h("h1", {}, `🛡 @${pa.username} と @${pb.username} のやり取り`),
+    return h("div", { class: "dm-app" },
+      h("div", { class: "dm-head" }, h("a", { class: "dm-back", href: "#/messages/all", "aria-label": "戻る" }, "←"),
+        avatar(pa.username, "sm"), h("strong", {}, "@" + pa.username), h("span", { class: "muted" }, "と"), avatar(pb.username, "sm"), h("strong", {}, "@" + pb.username),
+        h("span", { class: "badge", style: "margin-left:auto" }, "🛡 管理者の閲覧")),
       h("div", { class: "dm-box" }, ...(data.length ? data.map(m => dmBubble(m, pa.id)) : [h("p", { class: "muted" }, "メッセージはありません。")])));
   }
 
