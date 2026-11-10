@@ -43,6 +43,9 @@
     const m = (err && err.message) || String(err);
     if (/Invalid login credentials/i.test(m)) return "ユーザー名またはパスワードが違います。";
     if (/Email not confirmed/i.test(m)) return "メールアドレスの確認が完了していません。届いたメールのリンクを開いてください。";
+    if (/already been registered|already registered|email_exists|email address.*already/i.test(m)) return "そのメールアドレスは、すでに使われています。";
+    if (/should be different|same email/i.test(m)) return "今のメールアドレスと同じです。";
+    if (/invalid.*email|email.*invalid|unable to validate email/i.test(m)) return "メールアドレスの形式が正しくありません。";
     if (/rate limit|too many/i.test(m)) return "短時間に操作が多すぎます。しばらくしてからやり直してください。";
     if (/row-level security/i.test(m)) return "この操作を行う権限がありません。";
     if (/duplicate key/i.test(m)) return "既に使われています。";
@@ -143,8 +146,8 @@
   }
   const daysLeft = () => acct ? Math.max(0, Math.ceil(acct.seconds_left / 86400)) : 0;
   // 認証メールを送る（メール内のリンクを開くと、認証済みになる）
-  async function sendVerifyMail() {
-    const { error } = await sb.auth.signInWithOtp({ email: session.user.email, options: { shouldCreateUser: false, emailRedirectTo: BASE_URL } });
+  async function sendVerifyMail(addr) {
+    const { error } = await sb.auth.signInWithOtp({ email: addr || session.user.email, options: { shouldCreateUser: false, emailRedirectTo: BASE_URL } });
     if (error) throw error;
   }
   // 未読メッセージ数（DM）
@@ -209,6 +212,11 @@
         await loadProfile();
         renderNav();
         if (location.hash !== "#/reset") go("#/reset"); else route();
+        return;
+      }
+      if (event === "USER_UPDATED") {
+        // メールアドレスの変更の完了・申請などで、ユーザー情報が変わったとき
+        if (location.hash.startsWith("#/account")) route();
         return;
       }
       if (event === "SIGNED_IN" && uid && uid === lastUserId && acct && !acct.verified) {
@@ -505,6 +513,28 @@
       referrerpolicy: "no-referrer",
       srcdoc: doc
     });
+  }
+
+  // プレビューの全画面表示（全画面 API が使えない端末では、画面いっぱいの重ね表示にする）
+  function previewWithFullscreen(doc) {
+    const wrap = h("div", { class: "preview-wrap", tabindex: "-1" });
+    const frame = previewFrame(doc);
+    const btn = h("button", { class: "btn small preview-fs", type: "button", title: "プレビューを全画面で表示" }, "⛶ 全画面");
+    const isFs = () => document.fullscreenElement === wrap || wrap.classList.contains("fs-fixed");
+    const sync = () => { btn.textContent = isFs() ? "✕ 閉じる" : "⛶ 全画面"; };
+    function enter() {
+      if (wrap.requestFullscreen) wrap.requestFullscreen().catch(() => { wrap.classList.add("fs-fixed"); sync(); });
+      else { wrap.classList.add("fs-fixed"); sync(); }
+    }
+    function leave() {
+      if (document.fullscreenElement === wrap) document.exitFullscreen();
+      wrap.classList.remove("fs-fixed"); sync();
+    }
+    btn.addEventListener("click", () => (isFs() ? leave() : enter()));
+    document.addEventListener("fullscreenchange", sync);
+    wrap.addEventListener("keydown", e => { if (e.key === "Escape") leave(); });
+    wrap.append(btn, frame);
+    return wrap;
   }
 
   function safeName(s) {
@@ -1221,7 +1251,48 @@
         go("#/");
       });
     });
-    return h("div", {}, form, passwordCard());
+    return h("div", {}, form, emailCard(), passwordCard());
+  }
+
+  // メールアドレスの変更：今のパスワードで本人確認 → 確認メール内のリンクを開くと変更が完了
+  function emailCard() {
+    const cur = session.user.email || "";
+    const pending = session.user.new_email || "";
+    const ne = h("input", { type: "email", autocomplete: "email", required: true });
+    const pw = h("input", { type: "password", autocomplete: "current-password", required: true });
+    const btn = h("button", { class: "btn primary", type: "submit" }, "確認メールを送る");
+    const form = h("form", { class: "card form" },
+      h("h2", {}, "✉️ メールアドレスの変更"),
+      h("p", {}, "現在のメールアドレス：", h("strong", {}, cur)),
+      pending ? h("div", { class: "notice" }, `📧 ${pending} への変更を、確認待ちです。届いたメールのリンクを開くと、変更が完了します（設定によっては、現在のアドレスにも確認メールが届き、両方のリンクを開く必要があります）。`) : null,
+      h("p", { class: "muted" }, "メールアドレスは、パスワードを忘れたときの再設定や、認証メールの送り先に使われます。実際に受け取れるアドレスを入力してください。"),
+      field("新しいメールアドレス", ne),
+      field("今のパスワード（本人確認）", pw),
+      h("div", { class: "actions" }, btn));
+    form.addEventListener("submit", e => {
+      e.preventDefault();
+      busy(btn, async () => {
+        const next = ne.value.trim();
+        if (next.toLowerCase() === cur.toLowerCase()) throw new Error("should be different");
+        const { error: e1 } = await sb.auth.signInWithPassword({ email: cur, password: pw.value });
+        if (e1) throw new Error("今のパスワードが違います。");
+        const { data, error } = await sb.auth.updateUser({ email: next }, { emailRedirectTo: BASE_URL });
+        if (error) throw error;
+        pw.value = ""; ne.value = "";
+        const u = data && data.user;
+        if (u && !u.new_email && String(u.email || "").toLowerCase() === next.toLowerCase()) {
+          // 確認なしで変更された設定：認証済みの記録を外し、新しいアドレスで認証し直してもらう（7日の猶予）
+          await sb.rpc("reset_email_verification");
+          try { await sendVerifyMail(next); } catch (e2) { /* 画面上部のボタンから再送できる */ }
+          await loadAccountStatus();
+          renderNav();
+          toast("メールアドレスを変更しました。新しいアドレスに届いた認証メールのリンクを開いてください（7日以内）");
+          return;
+        }
+        toast(`${next} に確認メールを送りました。届いたメールのリンクを開くと、変更が完了します`);
+      });
+    });
+    return form;
   }
 
   // パスワード変更：①今のパスワード → ②メールに届く認証コード → ③新しいパスワード
@@ -1556,7 +1627,7 @@
   async function viewProject(id) {
     const [project, postsRes, commentsRes, myViewRes] = await Promise.all([
       fetchProject(id),
-      sb.from("posts").select("id,title,created_at,author_id,is_public,author:profiles!author_id(username)")
+      sb.from("posts").select("id,title,created_at,author_id,is_public,allow_download,author:profiles!author_id(username)")
         .eq("project_id", id).order("created_at", { ascending: false }),
       sb.from("comments").select("id,body,created_at,author_id,parent_id,author:profiles!author_id(username)")
         .eq("project_id", id).order("created_at", { ascending: true }),
@@ -1627,13 +1698,17 @@
         // 投稿のコードを取得して、HTML1ファイルとしてそのままダウンロード
         const visible = canSee(p);
         let dlBtn;
-        if (visible) {
+        const dlOk = p.is_public === false || p.allow_download !== false || (!!session && (p.author_id === session.user.id || isOwner || !!project.myCollab));
+        if (visible && !dlOk) {
+          dlBtn = h("span", { class: "badge", title: "投稿者がダウンロードを許可していません" }, "⬇ ダウンロード不可");
+        } else if (visible) {
           dlBtn = h("button", { class: "btn small", type: "button" }, "⬇ htmlとしてダウンロード");
           dlBtn.addEventListener("click", () => busy(dlBtn, async () => {
             const { data, error } = await sb.rpc("get_post", { p_id: p.id });
             if (error) throw error;
             if (!data) throw new Error("投稿が見つかりません。");
             if (!data.can_view) throw new Error("この投稿は限定公開のため、ダウンロードできません。");
+            if (!data.can_download) throw new Error("この投稿は、投稿者がダウンロードを許可していません。");
             downloadSingleHtml(data);
           }));
         } else if (!session) {
@@ -1706,6 +1781,11 @@
     const publicRow = h("label", { class: "check" }, isPublic,
       h("span", {}, "このhtmlを一般公開する",
         h("small", { class: "hint" }, "オフにすると限定公開になります。企画の投稿一覧には表示されますが、閲覧を許可された人以外は、プレビュー・コード閲覧・ダウンロードができません。投稿したあとも変更できます。")));
+    // 一般公開のときだけ出る「ダウンロードを許可する」
+    const allowDl = h("input", { type: "checkbox", checked: editing ? post.allow_download !== false : true });
+    const dlRow = h("label", { class: "check" }, allowDl,
+      h("span", {}, "ダウンロードを許可する",
+        h("small", { class: "hint" }, "オフにすると、他の人にはダウンロードボタンが出ません（プレビューとコードの閲覧はできます）。作成者・企画主・共同編集者・管理者は、この設定にかかわらずダウンロードできます。投稿したあとも変更できます。")));
     const viewers = new Map();       // いま選ばれている閲覧者（user_id → ユーザー名）
     const origViewers = new Map();   // 保存済みの閲覧者
     const viewerList = h("div", {});
@@ -1727,7 +1807,7 @@
       h("strong", {}, "🔒 限定公開"),
       h("p", { style: "margin:.2rem 0 .5rem" }, "作成者・企画主・共同編集者・管理者と、下で追加した人だけが、コードを見られます。（保存したときに反映されます）"),
       viewerList, viewerPicker.node);
-    const syncVisibility = () => limitedBox.classList.toggle("hidden", isPublic.checked);
+    const syncVisibility = () => { limitedBox.classList.toggle("hidden", isPublic.checked); dlRow.classList.toggle("hidden", !isPublic.checked); };
     isPublic.addEventListener("change", syncVisibility);
     // 編集のときは、いまの閲覧者を読み込む
     const viewersReady = editing
@@ -1857,7 +1937,7 @@
           : "各500KBまで。超える場合は、管理者に要請できます（承認されると最大2MBまで）。"),
       field("タイトル", title),
       modeTabs, codeFields, fileBox,
-      publicRow, limitedBox,
+      publicRow, dlRow, limitedBox,
       field("メモ（任意）", memo, "改善した点・変更点・使い方などを自由に書けます（2000文字まで）。投稿ページに表示されます。"),
       bigBox,
       h("div", { class: "actions" }, btn, prevBtn, h("a", { class: "btn", href: back }, "キャンセル")),
@@ -1866,7 +1946,7 @@
     form.addEventListener("submit", e => {
       e.preventDefault();
       busy(btn, async () => {
-        const row = { title: title.value.trim(), html: html.value, css: css.value, js: js.value, memo: memo.value.trim(), is_public: isPublic.checked };
+        const row = { title: title.value.trim(), html: html.value, css: css.value, js: js.value, memo: memo.value.trim(), is_public: isPublic.checked, allow_download: allowDl.checked };
         if (!row.title) throw new Error("タイトルを入力してください。");
         if (!row.html.trim() && !row.css.trim() && !row.js.trim()) throw new Error("HTML / CSS / JavaScript のいずれかを入力してください。");
         for (const k of ["html", "css", "js"]) {
@@ -2015,7 +2095,9 @@
     const zipBtn = h("button", { class: "btn", type: "button" }, "⬇ ZIP（分割）");
     zipBtn.addEventListener("click", () => busy(zipBtn, () => downloadPostZip(post)));
 
-    const actions = h("div", { class: "actions" }, htmlBtn, zipBtn);
+    const actions = h("div", { class: "actions" });
+    if (post.can_download !== false) actions.append(htmlBtn, zipBtn);
+    else actions.append(h("span", { class: "badge", title: "投稿者がダウンロードを許可していません" }, "⬇ ダウンロード不可"));
     if (isAuthor) {
       actions.append(h("a", { class: "btn", href: `#/post/${id}/edit` }, "編集"));
       // 公開設定のワンタッチ切り替え（閲覧者の追加は「編集」から）
@@ -2030,6 +2112,17 @@
         });
       });
       actions.append(toggle);
+      if (post.is_public) {
+        const dlOn = post.allow_download !== false;
+        const dlToggle = h("button", { class: "btn", type: "button" }, dlOn ? "⬇ ダウンロードを禁止する" : "⬇ ダウンロードを許可する");
+        dlToggle.addEventListener("click", () => busy(dlToggle, async () => {
+          const { error } = await sb.from("posts").update({ allow_download: !dlOn }).eq("id", id);
+          if (error) throw error;
+          toast(dlOn ? "ダウンロードを禁止しました" : "ダウンロードを許可しました");
+          route();
+        }));
+        actions.append(dlToggle);
+      }
     }
     if (isAuthor || isOwner) {
       const del = h("button", { class: "btn danger", type: "button" }, "削除");
@@ -2047,7 +2140,7 @@
 
     // タブ（プレビュー / HTML / CSS / JS）
     const panels = {
-      preview: previewFrame(compose(post, false)),
+      preview: previewWithFullscreen(compose(post, false)),
       html: h("pre", { class: "codeview" }, post.html || "（なし）"),
       css: h("pre", { class: "codeview" }, post.css || "（なし）"),
       js: h("pre", { class: "codeview" }, post.js || "（なし）")
