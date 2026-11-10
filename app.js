@@ -53,6 +53,10 @@
     if (/already requested/i.test(m)) return "すでに公開を要請済みです。作成者の対応をお待ちください。";
     if (/already public/i.test(m)) return "この投稿は、すでに閲覧できる状態です。";
     if (/cannot delete yourself/i.test(m)) return "自分自身のアカウントは削除できません。";
+    if (/too fast/i.test(m)) return "送信が速すぎます。3秒ほどおいてから送ってください。";
+    if (/message too long/i.test(m)) return "メッセージは200文字までです。";
+    if (/empty message/i.test(m)) return "メッセージを入力してください。";
+    if (/invalid recipient/i.test(m)) return "この相手には送れません。";
     if (/account frozen/i.test(m)) return "アカウントが一時凍結されています。メール認証を完了すると、また使えるようになります。";
     if (/nonce|reauthentication/i.test(m)) return "メールで届いた認証コードが違うか、期限切れです。コードをもう一度送って、やり直してください。";
     if (/same.*password|different from the old/i.test(m)) return "新しいパスワードは、今のパスワードと違うものにしてください。";
@@ -114,6 +118,12 @@
     const name = username || "?";
     const t = h(strong ? "strong" : "span", {}, "@" + name);
     const isAdm = adminNames.has(String(name).toLowerCase());
+    if (!username) return h("span", { class: "nametag" }, t);
+    const go2 = e => { e.preventDefault(); e.stopPropagation(); location.hash = "#/user/" + encodeURIComponent(name); };
+    t.classList.add("name-link");
+    t.setAttribute("role", "link"); t.setAttribute("tabindex", "0"); t.setAttribute("title", "プロフィールを見る");
+    t.addEventListener("click", go2);
+    t.addEventListener("keydown", e => { if (e.key === "Enter") go2(e); });
     return h("span", { class: "nametag" }, t, isAdm ? h("span", { class: "badge open admin-badge" }, "管理者") : null);
   }
 
@@ -135,6 +145,17 @@
     const { error } = await sb.auth.signInWithOtp({ email: session.user.email, options: { shouldCreateUser: false, emailRedirectTo: BASE_URL } });
     if (error) throw error;
   }
+  // 未読メッセージ数（DM）
+  let dmUnread = 0;
+  async function refreshDmUnread() {
+    if (!session) { dmUnread = 0; return; }
+    try {
+      const { count, error } = await sb.from("direct_messages").select("id", { count: "exact", head: true })
+        .eq("recipient_id", session.user.id).is("read_at", null);
+      dmUnread = error ? 0 : (count || 0);
+    } catch (e) { dmUnread = 0; }
+  }
+  let dmTimer = null;
   const bannerEl = document.getElementById("banner");
   let nagged = false;
   function renderBanner() {
@@ -210,6 +231,7 @@
       // append(null) は「null」という文字が入ってしまうので、使わない要素は配列から除く
       navEl.append(...[
         h("a", { class: "who", href: "#/account", title: "ユーザー名の変更" }, profile ? `@${profile.username}` : "", isAdmin ? h("span", { class: "badge open", style: "margin-left:.4rem" }, "管理者") : null),
+        h("a", { class: "btn small", href: "#/messages" }, "💬 メッセージ" + (dmUnread ? ` (${dmUnread})` : "")),
         isAdmin ? h("a", { class: "btn small", href: "#/admin" }, "👤 ユーザー管理") : null,
         h("a", { class: "btn small primary", href: "#/new-project" }, "＋ 企画を作る"),
         h("button", {
@@ -246,6 +268,7 @@
     if (n.type === "upload_request") return `${who} さんが大容量投稿（500KB超・最大2MB）を要請しています`;
     if (n.type === "upload_approved") return `大容量投稿が承認されました（最大2MBを${n.request ? n.request.granted : "?"}回まで）`;
     if (n.type === "upload_rejected") return "大容量投稿の要請は承認されませんでした";
+    if (n.type === "verify_request") return `${who} さんが、メール認証（アカウントの認証）を要請しています`;
     if (n.type === "publish_request") return `${who} さんが、あなたの投稿「${n.post ? n.post.title : ""}」の公開を要請しています`;
     return n.type === "reply"
       ? `${who} さんがあなたのコメントに返信しました`
@@ -286,6 +309,7 @@
       let content;
       if (n.type === "upload_request") content = requestItem(n);
       else if (n.type === "publish_request") content = publishItem(n);
+      else if (n.type === "verify_request") content = verifyItem(n);
       else {
         content = h("button", { class: "bell-item" + (n.read_at ? "" : " unread"), type: "button" },
           h("div", { class: "t" }, notifText(n)),
@@ -344,6 +368,29 @@
     const open = h("button", { class: "btn small", type: "button" }, "投稿を開く");
     open.addEventListener("click", () => { markRead(n); bellOpen = false; renderBell(); go(`#/post/${n.post_id}`); });
     box.append(h("div", { class: "bell-req-actions" }, allow, open));
+    return box;
+  }
+
+  // 管理者向け：メール認証の要請（認証済みにする）
+  function verifyItem(n) {
+    const who = n.actor ? n.actor.username : "?";
+    const box = h("div", { class: "bell-item req" + (n.read_at ? "" : " unread") },
+      h("div", { class: "t" }, notifText(n)),
+      h("div", { class: "d" }, fmtDate(n.created_at)));
+    const ok = h("button", { class: "btn small primary", type: "button" }, `@${who} を認証済みにする`);
+    ok.addEventListener("click", () => {
+      if (!confirm(`@${who} を、メール認証済みにします（ログインできるようになります）。よろしいですか？`)) return;
+      busy(ok, async () => {
+        const { error } = await sb.rpc("admin_verify_user", { p_user: n.actor_id });
+        if (error) throw error;
+        markRead(n);
+        toast(`@${who} を認証済みにしました`);
+        renderBell();
+      });
+    });
+    const list = h("a", { class: "btn small", href: "#/admin" }, "ユーザー管理");
+    list.addEventListener("click", () => { markRead(n); bellOpen = false; renderBell(); });
+    box.append(h("div", { class: "bell-req-actions" }, ok, list));
     return box;
   }
 
@@ -498,7 +545,9 @@
    * ==================================================== */
   async function route() {
     const token = ++renderToken;
+    clearInterval(dmTimer);
     await loadAdminNames();
+    { const before = dmUnread; await refreshDmUnread(); if (before !== dmUnread) renderNav(); }
     loadNotifs();   // ベルの更新（待たない）
     const seg = location.hash.replace(/^#\/?/, "").split("?")[0].split("/").filter(Boolean);
     try {
@@ -513,6 +562,11 @@
       else if (a === "reset") view = viewReset();
       else if (a === "admin") view = await viewAdmin();
       else if (a === "account") view = viewAccount();
+      else if (a === "user" && b) view = await viewUser(decodeURIComponent(b));
+      else if (a === "messages" && b === "all") view = await viewDmAll();
+      else if (a === "messages" && b) view = await viewThread(decodeURIComponent(b), token);
+      else if (a === "messages") view = await viewMessages();
+      else if (a === "dm" && b && c) view = await viewDmPair(decodeURIComponent(b), decodeURIComponent(c));
       else if (a === "new-project") view = viewProjectForm(null);
       else if (a === "project" && b && c === "edit") view = await viewProjectEdit(b);
       else if (a === "project" && b && c === "new") view = await viewPostNew(b);
@@ -562,18 +616,43 @@
     const u = h("input", { type: "text", autocomplete: "username", required: true, maxlength: 20 });
     const p = h("input", { type: "password", autocomplete: "current-password", required: true });
     const btn = h("button", { class: "btn primary", type: "submit" }, "ログイン");
+    const notConfirmed = h("div", {});
     const form = h("form", { class: "card narrow" },
       h("h1", {}, "ログイン"),
-      field("ユーザー名", u), field("パスワード", p), btn,
+      field("ユーザー名", u), field("パスワード", p), btn, notConfirmed,
       h("p", { class: "hint-mail" }, "📧 新規登録のあとは、確認メールのリンクを開くまでログインできません。"),
       h("p", { class: "links" }, h("a", { href: "#/forgot" }, "パスワードを忘れた方"), " ・ ", h("a", { href: "#/signup" }, "新規登録")));
     form.addEventListener("submit", e => {
       e.preventDefault();
       busy(btn, async () => {
+        notConfirmed.replaceChildren();
         const { data: email, error: e1 } = await sb.rpc("email_for_username", { p_username: u.value.trim() });
         if (e1) throw e1;
         if (!email) throw new Error("Invalid login credentials");
         const { error } = await sb.auth.signInWithPassword({ email, password: p.value });
+        if (error && /Email not confirmed/i.test(error.message)) {
+          // メール未認証：認証メールの再送／管理者への認証の要請
+          const username = u.value.trim();
+          const ask = h("button", { class: "btn primary", type: "button" }, "管理者に認証を要請する");
+          ask.addEventListener("click", () => busy(ask, async () => {
+            const { error: e3 } = await sb.rpc("request_email_verify", { p_username: username });
+            if (e3) throw e3;
+            ask.disabled = true;
+            ask.textContent = "要請しました";
+            toast("管理者に認証を要請しました。認証されるまでお待ちください");
+          }));
+          const resend = h("button", { class: "btn", type: "button" }, "確認メールを再送する");
+          resend.addEventListener("click", () => busy(resend, async () => {
+            const { error: e4 } = await sb.auth.resend({ type: "signup", email, options: { emailRedirectTo: BASE_URL } });
+            if (e4) throw e4;
+            toast("確認メールを再送しました");
+          }));
+          notConfirmed.replaceChildren(h("div", { class: "notice" },
+            h("strong", {}, "メールアドレスの認証が済んでいません。"),
+            h("br"), "届いたメールのリンクを開いてください。メールが届かないときは、管理者に認証を要請できます。",
+            h("div", { class: "actions", style: "margin-top:.6rem" }, ask, resend)));
+          return;
+        }
         if (error) throw error;
         toast("ログインしました");
         go("#/");
@@ -842,6 +921,185 @@
         h("h1", {}, "企画一覧"),
         session ? h("a", { class: "btn primary", href: "#/new-project" }, "＋ 企画を作る") : null),
       h("div", { class: "search-row" }, search, mineBtn), list);
+  }
+
+  /* ======================================================
+   * プロフィール
+   * ==================================================== */
+  const likeEsc = t => t.replace(/[\\%_]/g, m => "\\" + m);
+  async function findProfile(name) {
+    const { data, error } = await sb.from("profiles").select("id,username,created_at").ilike("username", likeEsc(name)).limit(1);
+    if (error) throw error;
+    return data && data[0] ? data[0] : null;
+  }
+
+  async function viewUser(name) {
+    const pf = await findProfile(name);
+    if (!pf) return h("div", { class: "error-box" }, "そのユーザーは見つかりませんでした。");
+    const [pr, po] = await Promise.all([
+      sb.from("projects").select("id,title,description,created_at").eq("owner_id", pf.id).order("created_at", { ascending: false }),
+      sb.from("posts").select("id,title,created_at,project:projects(title)").eq("author_id", pf.id).eq("is_public", true)
+        .order("created_at", { ascending: false }).limit(50)
+    ]);
+    if (pr.error) throw pr.error;
+    if (po.error) throw po.error;
+    const me = session && session.user.id === pf.id;
+    const actions = !session ? h("a", { class: "btn small", href: "#/login" }, "ログインしてメッセージを送る")
+      : me ? h("a", { class: "btn small", href: "#/account" }, "アカウント設定")
+      : h("a", { class: "btn primary", href: `#/messages/${encodeURIComponent(pf.username)}` }, "💬 メッセージを送る");
+    return h("div", {},
+      h("div", { class: "card" },
+        h("h1", {}, "@" + pf.username, adminNames.has(pf.username.toLowerCase()) ? h("span", { class: "badge open admin-badge", style: "margin-left:.5rem" }, "管理者") : null),
+        h("div", { class: "meta" }, h("span", {}, "登録日 " + fmtDate(pf.created_at)),
+          h("span", {}, `企画 ${pr.data.length}件`), h("span", {}, `公開投稿 ${po.data.length}件`)),
+        h("div", { class: "actions" }, actions)),
+      h("h2", {}, "この人の企画"),
+      pr.data.length
+        ? h("div", { class: "grid" }, ...pr.data.map(p => h("a", { class: "card project-card", href: `#/project/${p.id}` },
+            h("h3", {}, p.title), p.description ? h("p", { class: "desc" }, p.description) : null,
+            h("div", { class: "meta" }, h("span", {}, fmtDate(p.created_at))))))
+        : h("p", { class: "muted" }, "企画はまだありません。"),
+      h("h2", {}, "この人の公開投稿"),
+      po.data.length
+        ? h("div", { class: "list" }, ...po.data.map(p => h("a", { class: "card post-item", href: `#/post/${p.id}` },
+            h("strong", {}, p.title),
+            h("span", { class: "muted" }, ` ／ 企画：${p.project ? p.project.title : "?"} ／ ${fmtDate(p.created_at)}`))))
+        : h("p", { class: "muted" }, "公開投稿はまだありません。"));
+  }
+
+  /* ======================================================
+   * メッセージ（DM）
+   * ==================================================== */
+  const DM_SELECT = "id,sender_id,recipient_id,body,created_at,read_at,sender:profiles!sender_id(username),recipient:profiles!recipient_id(username)";
+  const dmNotice = () => h("div", { class: "notice" }, "🗑 メッセージは、送ってから1週間で自動的に削除されます。" +
+    "🛡 管理者は、すべてのメッセージを確認できます。連投防止のため、送信は3秒に1回、1通200文字までです。");
+
+  async function viewMessages() {
+    if (!session) return needLogin("メッセージを使うにはログインが必要です。");
+    const me = session.user.id;
+    const { data, error } = await sb.from("direct_messages").select(DM_SELECT)
+      .or(`sender_id.eq.${me},recipient_id.eq.${me}`).order("created_at", { ascending: false }).limit(500);
+    if (error) throw error;
+    const convs = new Map();
+    (data || []).forEach(m => {
+      const other = m.sender_id === me ? m.recipient : m.sender;
+      const name = other ? other.username : "?";
+      if (!convs.has(name)) convs.set(name, { name, last: m, unread: 0 });
+      if (m.recipient_id === me && !m.read_at) convs.get(name).unread++;
+    });
+    const picker = userPicker({
+      placeholder: "ユーザー名で検索して、新しくメッセージを送る…",
+      exclude: uid => uid === me,
+      onPick: u => { go(`#/messages/${encodeURIComponent(u.username)}`); }
+    });
+    const list = h("div", { class: "list" });
+    if (!convs.size) list.append(h("p", { class: "muted" }, "メッセージはまだありません。ユーザーのプロフィールか、上の検索から送れます。"));
+    convs.forEach(c => list.append(h("a", { class: "card post-item dm-conv", href: `#/messages/${encodeURIComponent(c.name)}` },
+      h("strong", {}, "@" + c.name), c.unread ? h("span", { class: "badge open", style: "margin-left:.4rem" }, `未読 ${c.unread}`) : null,
+      h("div", { class: "muted dm-preview" }, (c.last.sender_id === me ? "あなた：" : "") + c.last.body),
+      h("div", { class: "muted", style: "font-size:.8rem" }, fmtDate(c.last.created_at)))));
+    return h("div", {},
+      h("h1", {}, "💬 メッセージ"),
+      dmNotice(),
+      isAdmin ? h("p", {}, h("a", { class: "btn small", href: "#/messages/all" }, "🛡 すべてのメッセージを見る（管理者）")) : null,
+      h("div", { class: "card" }, picker.node),
+      list);
+  }
+
+  function dmBubble(m, meId) {
+    const mine = m.sender_id === meId;
+    return h("div", { class: "dm-row" + (mine ? " mine" : "") },
+      h("div", { class: "dm-bubble" }, m.body),
+      h("div", { class: "dm-time" }, (mine ? "" : "@" + (m.sender ? m.sender.username : "?") + "　") + fmtDate(m.created_at)));
+  }
+
+  async function viewThread(name, token) {
+    if (!session) return needLogin("メッセージを使うにはログインが必要です。");
+    const pf = await findProfile(name);
+    if (!pf) return h("div", { class: "error-box" }, "そのユーザーは見つかりませんでした。");
+    if (pf.id === session.user.id) return h("div", { class: "error-box" }, "自分自身には送れません。");
+    const me = session.user.id;
+    const box = h("div", { class: "dm-box" });
+    async function load() {
+      const { data, error } = await sb.from("direct_messages").select(DM_SELECT)
+        .or(`and(sender_id.eq.${me},recipient_id.eq.${pf.id}),and(sender_id.eq.${pf.id},recipient_id.eq.${me})`)
+        .order("created_at", { ascending: true }).limit(500);
+      if (error) throw error;
+      const stick = box.scrollHeight - box.scrollTop - box.clientHeight < 40 || !box.childElementCount;
+      box.replaceChildren(...(data.length ? data.map(m => dmBubble(m, me)) : [h("p", { class: "muted" }, "まだメッセージはありません。")]));
+      if (stick) box.scrollTop = box.scrollHeight;
+      if (data.some(m => m.recipient_id === me && !m.read_at)) {
+        await sb.rpc("mark_dm_read", { p_with: pf.id });
+        await refreshDmUnread(); renderNav();
+      }
+    }
+    await load();
+    dmTimer = setInterval(() => { if (token === renderToken && !document.hidden) load().catch(() => {}); }, 8000);
+
+    const ta = h("textarea", { rows: 3, placeholder: isAdmin ? "メッセージ（管理者は文字数の制限なし）" : "メッセージ（200文字まで）" });
+    if (!isAdmin) ta.maxLength = 200;
+    const counter = h("span", { class: "muted" }, isAdmin ? "" : "0 / 200");
+    ta.addEventListener("input", () => { if (!isAdmin) counter.textContent = `${ta.value.length} / 200`; });
+    const send = h("button", { class: "btn primary", type: "submit" }, "送信");
+    const form = h("form", { class: "dm-form" }, ta, h("div", { class: "dm-form-row" }, counter, send));
+    form.addEventListener("submit", e => {
+      e.preventDefault();
+      let sent = false;
+      busy(send, async () => {
+        const body = ta.value.trim();
+        if (!body) throw new Error("メッセージを入力してください。");
+        const { error } = await sb.rpc("send_dm", { p_to: pf.id, p_body: body });
+        if (error) throw error;
+        ta.value = ""; counter.textContent = isAdmin ? "" : "0 / 200";
+        await load(); box.scrollTop = box.scrollHeight;
+        sent = true;
+      }).then(() => {
+        if (sent && !isAdmin) { send.disabled = true; setTimeout(() => { send.disabled = false; }, 3000); }   // 連投防止（3秒）
+      });
+    });
+    return h("div", {},
+      h("p", {}, h("a", { href: "#/messages" }, "← メッセージ一覧")),
+      h("h1", {}, h("span", {}, "💬 "), nameTag(pf.username, true)),
+      dmNotice(), box, form);
+  }
+
+  // 管理者：すべてのメッセージ
+  async function viewDmAll() {
+    if (!isAdmin) return h("div", { class: "error-box" }, "管理者だけが見られるページです。");
+    const { data, error } = await sb.from("direct_messages").select(DM_SELECT).order("created_at", { ascending: false }).limit(500);
+    if (error) throw error;
+    const q = h("input", { type: "search", class: "search", placeholder: "ユーザー名・本文で絞り込み…" });
+    const list = h("div", { class: "list" });
+    function draw() {
+      const t = q.value.trim().toLowerCase();
+      list.replaceChildren();
+      const rows = data.filter(m => !t || (`${m.sender && m.sender.username} ${m.recipient && m.recipient.username} ${m.body}`).toLowerCase().includes(t));
+      if (!rows.length) list.append(h("p", { class: "muted" }, "該当するメッセージがありません。"));
+      rows.forEach(m => {
+        const a = m.sender ? m.sender.username : "?", b = m.recipient ? m.recipient.username : "?";
+        list.append(h("a", { class: "card post-item dm-conv", href: `#/dm/${encodeURIComponent(a)}/${encodeURIComponent(b)}` },
+          h("strong", {}, `@${a} → @${b}`), h("span", { class: "muted" }, "　" + fmtDate(m.created_at)),
+          h("div", { class: "dm-preview" }, m.body)));
+      });
+    }
+    q.addEventListener("input", draw);
+    draw();
+    return h("div", {}, h("p", {}, h("a", { href: "#/messages" }, "← メッセージ一覧")),
+      h("h1", {}, "🛡 すべてのメッセージ（管理者）"),
+      h("p", { class: "muted" }, "直近1週間・最新500件まで。クリックすると、その2人のやり取りを開きます。"), q, list);
+  }
+
+  async function viewDmPair(a, b) {
+    if (!isAdmin) return h("div", { class: "error-box" }, "管理者だけが見られるページです。");
+    const [pa, pb] = await Promise.all([findProfile(a), findProfile(b)]);
+    if (!pa || !pb) return h("div", { class: "error-box" }, "ユーザーが見つかりませんでした。");
+    const { data, error } = await sb.from("direct_messages").select(DM_SELECT)
+      .or(`and(sender_id.eq.${pa.id},recipient_id.eq.${pb.id}),and(sender_id.eq.${pb.id},recipient_id.eq.${pa.id})`)
+      .order("created_at", { ascending: true }).limit(500);
+    if (error) throw error;
+    return h("div", {}, h("p", {}, h("a", { href: "#/messages/all" }, "← すべてのメッセージ")),
+      h("h1", {}, `🛡 @${pa.username} と @${pb.username} のやり取り`),
+      h("div", { class: "dm-box" }, ...(data.length ? data.map(m => dmBubble(m, pa.id)) : [h("p", { class: "muted" }, "メッセージはありません。")])));
   }
 
   function viewAccount() {
