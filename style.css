@@ -326,3 +326,15 @@ iframe.preview { width: 100%; height: 480px; border: 1px solid var(--line); bord
 .preview-wrap:fullscreen { width: 100vw; height: 100vh; background: #fff; }
 .preview-wrap:fullscreen iframe.preview, .preview-wrap.fs-fixed iframe.preview { width: 100%; height: 100vh; border: 0; border-radius: 0; }
 .preview-wrap.fs-fixed { position: fixed; inset: 0; z-index: 3000; width: 100vw; height: 100vh; }
+
+/* 添付ファイル（画像・音声） */
+.assets-box { margin: 1rem 0; padding: .8rem 1rem; border: 1px dashed var(--line); border-radius: var(--radius); }
+.assets-box h3 { margin: 0 0 .3rem; font-size: 1rem; }
+.asset-list { margin-top: .6rem; display: flex; flex-direction: column; gap: .4rem; }
+.asset-row { display: flex; flex-wrap: wrap; gap: .3rem .6rem; align-items: center; padding: .4rem .6rem; background: #f6f8fa; border-radius: 8px; }
+.asset-fname { font-weight: 600; overflow-wrap: anywhere; }
+.asset-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: .7rem; }
+.asset-card { border: 1px solid var(--line); border-radius: 8px; padding: .5rem; background: var(--card); text-align: center; }
+.asset-card img { max-width: 100%; max-height: 120px; object-fit: contain; }
+.asset-card audio { width: 100%; }
+.asset-name { font-size: .82rem; font-weight: 600; overflow-wrap: anywhere; margin-top: .3rem; }
