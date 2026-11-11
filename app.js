@@ -2018,6 +2018,21 @@
     function draw() { drawBulkBar(); drawList(); }
     draw();
 
+    // 画像・音声ファイルの管理は、ふだんは隠しておき、ボタンを押したときだけ出す（初回に読み込む）
+    let assetBtn = null, assetSlot = null;
+    if (canManageAssets(project)) {
+      assetSlot = h("div", { class: "asset-slot hidden" });
+      assetBtn = h("button", { class: "btn", type: "button", "aria-expanded": "false" }, "🖼 画像・音声");
+      let panel = null;
+      assetBtn.addEventListener("click", () => {
+        if (!panel) { panel = assetManager(project, posts); assetSlot.append(panel); }
+        const open = assetSlot.classList.toggle("hidden") === false;
+        assetBtn.setAttribute("aria-expanded", String(open));
+        assetBtn.classList.toggle("primary", open);
+        if (open) assetSlot.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+    }
+
     return h("section", {},
       h("div", { class: "card" },
         h("div", { class: "page-head" },
@@ -2026,12 +2041,12 @@
             h("div", { class: "meta" }, openBadge(project), h("span", {}, "企画主 ", nameTag(project.owner && project.owner.username)),
               project.collaborators.length ? h("span", {}, "共同編集者 ", ...project.collaborators.flatMap((c, i) => [i ? "、" : null, nameTag(c.user && c.user.username)].filter(Boolean))) : null,
               h("span", {}, fmtDate(project.created_at)))),
-          h("div", { class: "actions" }, zipBtn, canEditProject ? h("a", { class: "btn", href: `#/project/${id}/edit` }, "⚙ 設定") : null)),
+          h("div", { class: "actions" }, zipBtn, assetBtn, canEditProject ? h("a", { class: "btn", href: `#/project/${id}/edit` }, "⚙ 設定") : null)),
         project.description ? h("p", { style: "white-space:pre-wrap;margin:0" }, project.description) : null),
+      assetSlot,
       h("div", { class: "page-head" }, h("h2", {}, postLimit !== null ? `投稿（${posts.length} / 上限${postLimit}）` : `投稿（${posts.length}）`), h("div", { class: "actions" }, bulkBtn, postAction)),
       bulkBar,
       list,
-      canManageAssets(project) ? assetManager(project, posts) : null,
       commentsSection(project, commentsRes));
   }
 
