@@ -62,6 +62,7 @@
     if (/too many assets/i.test(m)) return "登録できるのは、1企画につき20ファイルまでです。";
     if (/too many posts for assets/i.test(m)) return "HTMLが4個以上ある企画には、画像・音声を登録できません（ファイルがある企画は、HTMLを3個までです）。";
     if (/too many posts/i.test(m)) { const n = (m.match(/too many posts:\s*(\d+)/i) || [])[1]; return `この企画のHTMLは、上限${n ? "（" + n + "個）" : ""}に達しています（画像・音声のファイルがある企画は3個まで、ない企画は6個までです）。`; }
+    if (/project quota/i.test(m)) return `この企画の画像・音声の容量が上限（${fmtSize(PROJECT_QUOTA)}）に達しています。使っていないファイルを削除してください。`;
     if (/too many groups/i.test(m)) return "グループは、1企画につき20個までです。";
     if (/duplicate group/i.test(m)) return "同じ名前のグループがすでにあります。";
     if (/invalid group name/i.test(m)) return "グループ名は1〜30文字で入力してください。";
@@ -611,6 +612,7 @@
   const ASSET_FREE = 500000;       // 許可なしで添付できる大きさ
   const ASSET_MAX = 3000000;       // 1ファイルの上限
   const ASSET_COUNT_MAX = 20;      // 1企画あたりの数
+  const PROJECT_QUOTA = 20000000;  // 1企画あたりの容量（合計）。SQL の add_project_asset の値と同じにする
   const ASSET_EXT = /\.(png|jpe?g|gif|webp|bmp|ico|avif|mp3|wav|ogg|m4a|aac|flac|opus)$/i;
   const assetNameOk = n => !!n && n.length <= 100 && !/[\\/:*?"<>|\u0000-\u001f]/.test(n) && !/^\./.test(n) && ASSET_EXT.test(n);
   const fmtSize = b => b >= 1000000 ? (b / 1000000).toFixed(2) + "MB" : Math.max(1, Math.round(b / 1000)) + "KB";
@@ -2161,6 +2163,8 @@
     });
 
     upBtn.addEventListener("click", () => busy(upBtn, async () => {
+      const used = ctx.getAssets().reduce((n, a) => n + (a.size || 0), 0), adding = picks.reduce((n, x) => n + x.size, 0);
+      if (used + adding > PROJECT_QUOTA) throw new Error(`この企画の容量の上限（${fmtSize(PROJECT_QUOTA)}）を超えます（いま${fmtSize(used)}、今回${fmtSize(adding)}）。ファイルを減らすか、使っていないファイルを削除してください。`);
       if (ctx.getPostCount() > 3) throw new Error("HTMLが4個以上ある企画には、画像・音声を登録できません（ファイルがある企画は、HTMLを3個までです）。");
       for (const it of picks) {
         const st = stateOf(it);
@@ -2194,7 +2198,7 @@
     node.append(
       h("h3", {}, "⬆ ファイルを登録"),
       h("p", { class: "muted", style: "margin:.2rem 0 .6rem" },
-        "png / jpg / gif / webp、mp3 / wav / ogg などを登録できます。1ファイル500KBまではそのまま登録できます。500KBを超えるファイルは、ファイルごとに管理者の許可が必要です（申請した大きさの5％増しまで・最大3MB）。"),
+        "png / jpg / gif / webp、mp3 / wav / ogg などを登録できます。1ファイル500KBまではそのまま登録できます（1企画の合計は20MBまで）。500KBを超えるファイルは、ファイルごとに管理者の許可が必要です（申請した大きさの5％増しまで・最大3MB）。"),
       input,
       h("div", { class: "upload-opts" }, h("label", {}, "入れるグループ：", groupSel)),
       targetBox, list, h("div", { class: "actions" }, upBtn));
@@ -2342,7 +2346,12 @@
 
     function render() {
       const limit = assets.length ? 3 : 6;
+      const used = assets.reduce((n, a) => n + (a.size || 0), 0);
+      const pct = Math.min(100, Math.round(used / PROJECT_QUOTA * 100));
       head.replaceChildren(
+        h("div", { class: "quota" + (pct >= 90 ? " warn" : "") },
+          h("div", {}, `容量：${fmtSize(used)} / ${fmtSize(PROJECT_QUOTA)}（${pct}%）　ファイル：${assets.length} / ${ASSET_COUNT_MAX}`),
+          h("div", { class: "quota-bar" }, h("div", { class: "quota-fill", style: `width:${pct}%` }))),
         h("p", { class: "notice" },
           `HTMLの数の上限：ファイルがある企画は3個まで、ない企画は6個までです（いま${posts.length}個・上限${limit}個）。`,
           posts.length > 3 && !assets.length ? h("strong", {}, " いまはHTMLが4個以上あるので、ファイルを登録するには、HTMLを3個以下にしてください。") : null,
