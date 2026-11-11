@@ -354,3 +354,22 @@ iframe.preview { width: 100%; height: 480px; border: 1px solid var(--line); bord
 .name-admin input { width: 100%; max-width: 18rem; padding: .35rem .5rem; border: 1px solid var(--line); border-radius: var(--radius); font: inherit; }
 .name-card h2 { margin-top: 0; font-size: 1.05rem; }
 .card h2 .badge { margin-left: .5rem; vertical-align: middle; }
+
+/* 企画の画像・音声ファイル（企画ページでの管理） */
+.assets-manager h2 { margin-top: 0; }
+.asset-upload { margin: .8rem 0; padding: .8rem 1rem; border: 1px dashed var(--line); border-radius: var(--radius); }
+.asset-upload h3 { margin: 0 0 .3rem; font-size: 1rem; }
+.upload-opts { margin: .6rem 0 .2rem; }
+.upload-opts select, .asset-row select { padding: .3rem .5rem; border: 1px solid var(--line); border-radius: var(--radius); background: #fff; color: var(--text); font: inherit; font-size: .88rem; }
+.group-create { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin: .8rem 0; }
+.group-create input { flex: 1 1 12rem; max-width: 20rem; padding: .4rem .6rem; border: 1px solid var(--line); border-radius: var(--radius); font: inherit; background: #fff; color: var(--text); }
+.asset-group { margin: .8rem 0; padding: .6rem .8rem; border: 1px solid var(--line); border-radius: var(--radius); background: var(--card); }
+.asset-group-head { display: flex; flex-wrap: wrap; gap: .4rem .6rem; align-items: center; margin-bottom: .4rem; }
+.grow { flex: 1 1 auto; }
+.asset-file { margin: .4rem 0; }
+.asset-pick { display: flex; flex-wrap: wrap; gap: .3rem .6rem; align-items: center; padding: .3rem .5rem; cursor: pointer; border-radius: 8px; }
+.asset-pick:hover { background: #f3f6fa; }
+details.targets { margin: .2rem 0 0 .6rem; font-size: .88rem; }
+details.targets > summary { cursor: pointer; color: var(--muted); padding: .2rem 0; }
+details.targets > summary.none { color: #8a5a00; }
+.target-list { display: flex; flex-wrap: wrap; gap: .3rem .9rem; padding: .4rem 0 .2rem; }
