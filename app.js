@@ -71,7 +71,11 @@
     if (/message too long/i.test(m)) return "一回の投稿で200文字までです。";
     if (/empty message/i.test(m)) return "メッセージを入力してください。";
     if (/invalid recipient/i.test(m)) return "この相手には送れません。";
-    if (/account frozen/i.test(m)) return "アカウントが一時凍結されています。メール認証を完了すると、また使えるようになります。";
+    if (/account frozen/i.test(m)) return "アカウントが一時凍結されています。メール認証や本名の入力を完了すると、また使えるようになります。";
+    if (/invalid name/i.test(m)) return "本名は1〜50文字で入力してください（改行などの特殊な文字は使えません）。";
+    if (/name locked/i.test(m)) return "管理者が確認済みのため、ご自身では変更できません。変更したいときは管理者に連絡してください。";
+    if (/name not entered/i.test(m)) return "まだ本名が入力されていません。";
+    if (/user not found/i.test(m)) return "そのユーザーが見つかりません。";
     if (/nonce|reauthentication/i.test(m)) return "メールで届いた認証コードが違うか、期限切れです。コードをもう一度送って、やり直してください。";
     if (/same.*password|different from the old/i.test(m)) return "新しいパスワードは、今のパスワードと違うものにしてください。";
     if (/username taken/i.test(m)) return "そのユーザー名はすでに使われています。";
@@ -171,23 +175,56 @@
   }
   let dmTimer = null;
   const bannerEl = document.getElementById("banner");
-  let nagged = false;
+  let nagged = false, naggedName = false;
+  // 本名の入力欄（本人用）。送信すると 1段階目（本人による入力）が完了し、管理者の確認待ちになる
+  const nameDaysLeft = () => acct ? Math.max(0, Math.ceil((acct.name_seconds_left || 0) / 86400)) : 0;
+  function nameForm(onDone, opts) {
+    opts = opts || {};
+    const inp = h("input", { type: "text", maxlength: 50, required: true, autocomplete: "name", placeholder: "例）山田 太郎", value: opts.value || "" });
+    const btn = h("button", { class: "btn primary" + (opts.small ? " small" : ""), type: "submit" }, opts.label || "送信する");
+    const form = h("form", { class: "name-form" }, inp, btn);
+    form.addEventListener("submit", e => {
+      e.preventDefault();
+      busy(btn, async () => {
+        const nm = inp.value.trim();
+        if (!nm) throw new Error("本名を入力してください。");
+        const { error } = await sb.rpc("set_my_real_name", { p_name: nm });
+        if (error) throw error;
+        await loadAccountStatus();
+        toast("本名を送信しました。管理者の確認をお待ちください");
+        if (onDone) onDone();
+      });
+    });
+    return form;
+  }
   function renderBanner() {
     bannerEl.replaceChildren();
-    if (!session || !acct || acct.verified || acct.frozen) return;
-    const d = daysLeft();
-    const send = h("button", { class: "btn small primary", type: "button" }, "認証メールを送る");
-    send.addEventListener("click", () => busy(send, async () => {
-      await sendVerifyMail();
-      toast("認証メールを送りました。届いたメールのリンクを開いてください");
-      send.textContent = "もう一度送る";
-    }));
-    bannerEl.append(h("div", { class: "verify-banner" },
-      h("span", {}, "📧 メールアドレスの認証がまだ済んでいません。",
-        d <= 1 ? h("strong", {}, "あと1日未満で、") : h("strong", {}, `あと${d}日で、`),
-        "このアカウントは一時凍結されます（メール認証を完了するまで使えなくなります）。"),
-      send));
-    if (!nagged) { nagged = true; toast(`メール認証がまだです。あと${d}日で凍結されます`, true); }
+    if (!session || !acct || acct.frozen) return;
+    if (!acct.verified) {
+      const d = daysLeft();
+      const send = h("button", { class: "btn small primary", type: "button" }, "認証メールを送る");
+      send.addEventListener("click", () => busy(send, async () => {
+        await sendVerifyMail();
+        toast("認証メールを送りました。届いたメールのリンクを開いてください");
+        send.textContent = "もう一度送る";
+      }));
+      bannerEl.append(h("div", { class: "verify-banner" },
+        h("span", {}, "📧 メールアドレスの認証がまだ済んでいません。",
+          d <= 1 ? h("strong", {}, "あと1日未満で、") : h("strong", {}, `あと${d}日で、`),
+          "このアカウントは一時凍結されます（メール認証を完了するまで使えなくなります）。"),
+        send));
+      if (!nagged) { nagged = true; toast(`メール認証がまだです。あと${d}日で凍結されます`, true); }
+    }
+    if (acct.name_required === true && !acct.name_entered) {
+      const d = nameDaysLeft();
+      bannerEl.append(h("div", { class: "verify-banner name-banner" },
+        h("div", { class: "name-banner-text" }, "📝 本名（フルネーム）を入力してください。",
+          h("strong", {}, " 入力された名前は、管理者にしか見えません（他のユーザーには表示されません）。"),
+          h("span", {}, d <= 1 ? " 入力がないと、あと1日未満で、" : ` 入力がないと、あと${d}日で、`),
+          "このアカウントは一時凍結されます。"),
+        nameForm(() => { renderNav(); route(); }, { small: true })));
+      if (!naggedName) { naggedName = true; toast(`本名の入力がまだです。あと${d}日で凍結されます`, true); }
+    }
   }
 
   async function loadProfile() {
@@ -718,23 +755,50 @@
    * 認証まわり
    * ==================================================== */
   function viewFrozen() {
-    const send = h("button", { class: "btn primary", type: "button" }, "認証メールを送る");
-    send.addEventListener("click", () => busy(send, async () => {
-      await sendVerifyMail();
-      toast("認証メールを送りました。届いたメールのリンクを開いてください");
-    }));
-    const recheck = h("button", { class: "btn", type: "button" }, "認証が済んだので、確認する");
-    recheck.addEventListener("click", () => busy(recheck, async () => {
+    const parts = [];
+    const emailF = acct.email_frozen !== false && !acct.verified;   // 古いSQLのままなら、従来どおりメールの凍結とみなす
+    const nameF = acct.name_frozen === true;
+    const refresh = async () => {
       await loadAccountStatus();
       if (acct && !acct.frozen) { toast("凍結を解除しました"); renderNav(); route(); }
-      else toast("まだ認証が確認できません。メールのリンクを開いてから、もう一度お試しください", true);
-    }));
+      else { renderNav(); route(); }
+    };
+    if (emailF) {
+      const send = h("button", { class: "btn primary", type: "button" }, "認証メールを送る");
+      send.addEventListener("click", () => busy(send, async () => {
+        await sendVerifyMail();
+        toast("認証メールを送りました。届いたメールのリンクを開いてください");
+      }));
+      const recheck = h("button", { class: "btn", type: "button" }, "認証が済んだので、確認する");
+      recheck.addEventListener("click", () => busy(recheck, async () => {
+        await loadAccountStatus();
+        if (acct && !acct.frozen) { toast("凍結を解除しました"); renderNav(); route(); }
+        else if (acct && acct.verified) { renderNav(); route(); }
+        else toast("まだ認証が確認できません。メールのリンクを開いてから、もう一度お試しください", true);
+      }));
+      parts.push(h("div", { class: "frozen-part" },
+        h("h2", {}, "📧 メール認証"),
+        h("p", {}, "登録から1週間がたっても、メールアドレスの認証が済んでいません。"),
+        h("div", { class: "notice" }, h("strong", {}, "メール認証を完了すると、使えるようになります。"),
+          h("br"), "「認証メールを送る」を押して、届いたメールのリンクを開いてください（メールが届くまで数分かかることがあります。迷惑メールフォルダも確認してください）。"),
+        h("div", { class: "actions" }, send, recheck)));
+    }
+    if (nameF) {
+      parts.push(h("div", { class: "frozen-part" },
+        h("h2", {}, "📝 本名の入力"),
+        h("p", {}, "登録から3日がたっても、本名の入力がありませんでした。"),
+        h("div", { class: "notice" }, h("strong", {}, "本名を入力すると、使えるようになります。"),
+          h("br"), "入力された名前は、管理者にしか見えません（他のユーザーには表示されません）。管理者が、誰が使っているのかを把握するために使います。"),
+        nameForm(refresh, { label: "本名を送信する" })));
+    }
+    if (!parts.length) {
+      const re = h("button", { class: "btn", type: "button" }, "状態を確認する");
+      re.addEventListener("click", () => busy(re, refresh));
+      parts.push(h("div", { class: "actions" }, re));
+    }
     return h("div", { class: "card narrow" },
       h("h1", {}, "🧊 アカウントが一時凍結されています"),
-      h("p", {}, "登録から1週間がたっても、メールアドレスの認証が済んでいないため、このアカウントは一時的に使えなくなっています。"),
-      h("div", { class: "notice" }, h("strong", {}, "メール認証を完了すると、すぐに使えるようになります。"),
-        h("br"), "「認証メールを送る」を押して、届いたメールのリンクを開いてください（メールが届くまで数分かかることがあります。迷惑メールフォルダも確認してください）。"),
-      h("div", { class: "actions" }, send, recheck));
+      ...parts);
   }
 
   function viewLogin() {
@@ -905,6 +969,64 @@
     return form;
   }
 
+  // 管理者用：本名の表示・登録・確認（2段階目は管理者だけ）。cur = {status:'none'|'entered'|'confirmed', real_name}
+  function adminNameBox(userId, username, cur, onChanged) {
+    const box = h("div", { class: "name-admin" });
+    const save = async (name, confirmToo) => {
+      const { error } = await sb.rpc("admin_set_real_name", { p_user: userId, p_name: name, p_confirm: !!confirmToo });
+      if (error) throw error;
+      cur = { status: confirmToo ? "confirmed" : "entered", real_name: name.trim() };
+      toast(confirmToo ? "本名を登録し、確認済みにしました" : "本名を登録しました（まだ確認前です）");
+      show();
+      if (onChanged) onChanged(cur);
+    };
+    function edit() {
+      box.replaceChildren();
+      const inp = h("input", { type: "text", maxlength: 50, placeholder: "本名（フルネーム）", value: cur.real_name || "" });
+      const b1 = h("button", { class: "btn small", type: "button" }, "保存");
+      const b2 = h("button", { class: "btn small primary", type: "button" }, "保存して確認済みに");
+      const b3 = h("button", { class: "btn small", type: "button" }, "やめる");
+      const need = () => { const v = inp.value.trim(); if (!v) throw new Error("本名を入力してください。"); return v; };
+      b1.addEventListener("click", () => busy(b1, () => save(need(), false)));
+      b2.addEventListener("click", () => busy(b2, () => save(need(), true)));
+      b3.addEventListener("click", show);
+      inp.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); b1.click(); } });
+      box.append(inp, h("div", { class: "name-acts" }, b1, b2, b3));
+      inp.focus();
+    }
+    function show() {
+      box.replaceChildren();
+      const st = cur.status || "none";
+      box.append(h("div", { class: "name-line" },
+        st === "none" ? h("span", { class: "muted" }, "（未入力）") : h("strong", {}, cur.real_name),
+        st === "confirmed" ? h("span", { class: "badge open" }, "✓ 確認済み")
+          : st === "entered" ? h("span", { class: "badge" }, "入力済み・未確認")
+          : h("span", { class: "badge lock" }, "未入力")));
+      const acts = h("div", { class: "name-acts" });
+      if (st === "entered") {
+        const c = h("button", { class: "btn small primary", type: "button" }, "確認済みにする");
+        c.addEventListener("click", () => {
+          if (!confirm(`@${username} の本名「${cur.real_name}」を、確認済みにします。よろしいですか？\n（確認後は、本人は名前を変更できません）`)) return;
+          busy(c, async () => {
+            const { error } = await sb.rpc("admin_confirm_real_name", { p_user: userId, p_confirm: true });
+            if (error) throw error;
+            cur = { status: "confirmed", real_name: cur.real_name };
+            toast("確認済みにしました");
+            show();
+            if (onChanged) onChanged(cur);
+          });
+        });
+        acts.append(c);
+      }
+      const e = h("button", { class: "btn small", type: "button" }, st === "none" ? "登録する" : "修正する");
+      e.addEventListener("click", edit);
+      acts.append(e);
+      box.append(acts);
+    }
+    show();
+    return box;
+  }
+
   /* ======================================================
    * 管理者：ユーザー管理（ユーザー名・メールアドレスの一覧、アカウント削除）
    * ==================================================== */
@@ -913,19 +1035,32 @@
     if (!isAdmin) return h("div", { class: "error-box" }, "管理者だけが開けるページです。");
     const { data, error } = await sb.rpc("admin_list_users");
     if (error) throw error;
-    const rows = data || [];
+    let rows = data || [];
 
-    const search = h("input", { type: "search", class: "search", placeholder: "ユーザー名・メールアドレスで検索…" });
+    const search = h("input", { type: "search", class: "search", placeholder: "ユーザー名・メールアドレス・本名で検索…" });
+    const nameFilter = h("select", { class: "name-filter", "aria-label": "本名の状態で絞り込み" },
+      h("option", { value: "" }, "本名：すべて"),
+      h("option", { value: "none" }, "本名：未入力"),
+      h("option", { value: "entered" }, "本名：入力済み・未確認"),
+      h("option", { value: "confirmed" }, "本名：確認済み"));
+    const refresh = async () => {
+      const r2 = await sb.rpc("admin_list_users");
+      if (r2.error) throw r2.error;
+      rows = r2.data || [];
+      draw();
+    };
     const tbody = h("tbody", {});
     const count = h("span", { class: "muted" }, "");
     const dateOnly = s => (s ? new Date(s).toLocaleDateString("ja-JP") : "—");
 
     function draw() {
       const q = search.value.trim().toLowerCase();
-      const items = rows.filter(r => !q || (r.username + " " + r.email).toLowerCase().includes(q));
+      const nf = nameFilter.value;
+      const items = rows.filter(r => (!q || (r.username + " " + r.email + " " + (r.real_name || "")).toLowerCase().includes(q)) &&
+        (!nf || (r.name_status || "none") === nf));
       count.textContent = `${items.length}人 / 全${rows.length}人`;
       tbody.replaceChildren();
-      if (!items.length) tbody.append(h("tr", {}, h("td", { colspan: 6, class: "muted" }, "該当するユーザーがいません。")));
+      if (!items.length) tbody.append(h("tr", {}, h("td", { colspan: 7, class: "muted" }, "該当するユーザーがいません。")));
       items.forEach(r => {
         const self = r.user_id === session.user.id;
         let action;
@@ -965,6 +1100,8 @@
           h("td", {}, nameTag(r.username, true), r.is_admin && !adminNames.has(String(r.username).toLowerCase()) ? h("span", { class: "badge open admin-badge" }, "管理者") : null),
           h("td", { class: "mail" }, r.email),
           h("td", {}, dateOnly(r.created_at)),
+          h("td", { class: "namecell" }, r.name_status === undefined ? h("span", { class: "muted" }, "—")
+            : adminNameBox(r.user_id, r.username, { status: r.name_status, real_name: r.real_name }, () => refresh().catch(e => toast(friendly(e), true)))),
           h("td", {}, r.email_confirmed ? h("span", { class: "badge open" }, "認証済み") : h("span", { class: "badge" }, "未認証"),
             r.frozen ? h("span", { class: "badge lock", style: "margin-left:.3rem" }, "🧊 凍結中") : null),
           h("td", {}, `${r.project_count} / ${r.post_count}`),
@@ -972,17 +1109,19 @@
       });
     }
     search.addEventListener("input", draw);
+    nameFilter.addEventListener("change", draw);
     draw();
 
     return h("section", {},
       h("div", { class: "page-head" }, h("h1", {}, "👤 ユーザー管理"), count),
-      h("p", { class: "notice" }, "管理者だけが見られるページです。メールアドレスは他の人には表示されません。取り扱いにご注意ください。"),
-      search,
+      h("p", { class: "notice" }, "管理者だけが見られるページです。メールアドレスと本名は他の人には表示されません。取り扱いにご注意ください。",
+        h("br"), "本名の確認は2段階です：①本人が入力（または管理者が登録）→ ②管理者が「確認済みにする」。登録から3日たっても本名が未入力のユーザーは、自動的に一時凍結されます（管理者は対象外）。"),
+      h("div", { class: "search-row" }, search, nameFilter),
       h("div", { class: "card table-wrap" },
         h("table", { class: "table" },
           h("thead", {}, h("tr", {},
             h("th", {}, "ユーザー名"), h("th", {}, "メールアドレス"), h("th", {}, "登録日"),
-            h("th", {}, "メール認証"), h("th", {}, "企画 / 投稿"), h("th", {}, "操作"))),
+            h("th", {}, "本名（管理者のみ）"), h("th", {}, "メール認証"), h("th", {}, "企画 / 投稿"), h("th", {}, "操作"))),
           tbody)));
   }
 
@@ -1070,6 +1209,14 @@
     if (pr.error) throw pr.error;
     if (po.error) throw po.error;
     const me = session && session.user.id === pf.id;
+    // 本名は、管理者にだけ表示する
+    let nameCard = null;
+    if (isAdmin) {
+      const { data: rn, error: rnErr } = await sb.rpc("admin_get_real_name", { p_user: pf.id });
+      if (!rnErr && rn) nameCard = h("div", { class: "card name-card" },
+        h("h2", {}, "📝 本名（管理者にだけ見えています）"),
+        adminNameBox(pf.id, pf.username, { status: rn.status, real_name: rn.real_name }));
+    }
     const actions = !session ? h("a", { class: "btn small", href: "#/login" }, "ログインしてメッセージを送る")
       : me ? h("a", { class: "btn small", href: "#/account" }, "アカウント設定")
       : h("a", { class: "btn primary", href: `#/messages/${encodeURIComponent(pf.username)}` }, "💬 メッセージを送る");
@@ -1079,6 +1226,7 @@
         h("div", { class: "meta" }, h("span", {}, "登録日 " + fmtDate(pf.created_at)),
           h("span", {}, `企画 ${pr.data.length}件`), h("span", {}, `公開投稿 ${po.data.length}件`)),
         h("div", { class: "actions" }, actions)),
+      nameCard,
       h("h2", {}, "この人の企画"),
       pr.data.length
         ? h("div", { class: "grid" }, ...pr.data.map(p => h("a", { class: "card project-card", href: `#/project/${p.id}` },
@@ -1337,7 +1485,23 @@
         go("#/");
       });
     });
-    return h("div", {}, form, emailCard(), passwordCard());
+    return h("div", {}, form, realNameCard(), emailCard(), passwordCard());
+  }
+
+  // 自分の本名（1段階目：本人の入力 → 2段階目：管理者の確認）
+  function realNameCard() {
+    if (!acct || acct.name_required !== true) return null;   // 管理者、または SQL が未実行のとき
+    const confirmed = acct.name_confirmed, entered = acct.name_entered;
+    const status = confirmed ? h("span", { class: "badge open" }, "✓ 管理者が確認済み")
+      : entered ? h("span", { class: "badge" }, "入力済み・管理者の確認待ち")
+      : h("span", { class: "badge lock" }, "未入力");
+    return h("div", { class: "card form" },
+      h("h2", {}, "📝 本名", status),
+      h("p", { class: "muted" }, "誰が使っているのかを管理者が把握するための情報です。",
+        h("strong", {}, "入力された名前は、管理者にしか見えません。"), "他のユーザーには表示されません。" +
+        (confirmed ? "管理者が確認済みのため、ご自身では変更できません。変更したいときは管理者に連絡してください。" : "")),
+      confirmed ? h("p", {}, h("strong", {}, acct.my_real_name))
+        : nameForm(() => route(), { value: acct.my_real_name || "", label: entered ? "修正して送り直す" : "送信する" }));
   }
 
   // メールアドレスの変更：今のパスワードで本人確認 → 確認メール内のリンクを開くと変更が完了
