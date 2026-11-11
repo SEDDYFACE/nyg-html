@@ -59,8 +59,15 @@
     if (/approval required/i.test(m)) return "500KBを超えるファイルは、管理者の許可が必要です。";
     if (/exceeds approved size/i.test(m)) return "許可されたファイルの大きさ（申請の5％増しまで）を超えています。";
     if (/asset too large/i.test(m)) return "ファイルは1つ3MBまでです。";
-    if (/too many assets/i.test(m)) return "添付できるのは、1投稿につき20ファイルまでです。";
-    if (/duplicate asset/i.test(m)) return "同じ名前のファイルがすでに添付されています。";
+    if (/too many assets/i.test(m)) return "登録できるのは、1企画につき20ファイルまでです。";
+    if (/too many posts for assets/i.test(m)) return "HTMLが4個以上ある企画には、画像・音声を登録できません（ファイルがある企画は、HTMLを3個までです）。";
+    if (/too many posts/i.test(m)) { const n = (m.match(/too many posts:\s*(\d+)/i) || [])[1]; return `この企画のHTMLは、上限${n ? "（" + n + "個）" : ""}に達しています（画像・音声のファイルがある企画は3個まで、ない企画は6個までです）。`; }
+    if (/too many groups/i.test(m)) return "グループは、1企画につき20個までです。";
+    if (/duplicate group/i.test(m)) return "同じ名前のグループがすでにあります。";
+    if (/invalid group name/i.test(m)) return "グループ名は1〜30文字で入力してください。";
+    if (/group not found/i.test(m)) return "グループが見つかりません。";
+    if (/asset not found/i.test(m)) return "ファイルが見つかりません（削除された可能性があります）。";
+    if (/duplicate asset/i.test(m)) return "同じ名前のファイルがすでに登録されています。";
     if (/invalid asset name/i.test(m)) return "ファイル名か、ファイルの種類が使えません（画像・音声のみ。名前に / \\ : * ? \" < > | は使えません）。";
     if (/invalid asset data/i.test(m)) return "ファイルの中身を読み取れませんでした。";
     if (/no request needed/i.test(m)) return "500KB以下のファイルは、許可なしで添付できます。";
@@ -331,7 +338,7 @@
     }
     if (n.type === "asset_approved") {
       const r = n.asset_req;
-      return `ファイル「${r ? r.file_name : "?"}」の添付が許可されました（${r ? fmtSize(r.limit_bytes) : "?"}まで）。投稿フォームで、もう一度そのファイルを選んでください`;
+      return `ファイル「${r ? r.file_name : "?"}」の添付が許可されました（${r ? fmtSize(r.limit_bytes) : "?"}まで）。企画ページの「画像・音声ファイル」で、もう一度そのファイルを選んで登録してください`;
     }
     if (n.type === "asset_rejected") return `ファイル「${n.asset_req ? n.asset_req.file_name : "?"}」の添付は許可されませんでした`;
     if (n.type === "verify_request") return `${who} さんが、メール認証（アカウントの認証）を要請しています`;
@@ -603,7 +610,7 @@
    * ==================================================== */
   const ASSET_FREE = 500000;       // 許可なしで添付できる大きさ
   const ASSET_MAX = 3000000;       // 1ファイルの上限
-  const ASSET_COUNT_MAX = 20;      // 1投稿あたりの数
+  const ASSET_COUNT_MAX = 20;      // 1企画あたりの数
   const ASSET_EXT = /\.(png|jpe?g|gif|webp|bmp|ico|avif|mp3|wav|ogg|m4a|aac|flac|opus)$/i;
   const assetNameOk = n => !!n && n.length <= 100 && !/[\\/:*?"<>|\u0000-\u001f]/.test(n) && !/^\./.test(n) && ASSET_EXT.test(n);
   const fmtSize = b => b >= 1000000 ? (b / 1000000).toFixed(2) + "MB" : Math.max(1, Math.round(b / 1000)) + "KB";
@@ -1875,16 +1882,19 @@
   }
 
   async function viewProject(id) {
-    const [project, postsRes, commentsRes, myViewRes] = await Promise.all([
+    const [project, postsRes, commentsRes, myViewRes, limitRes] = await Promise.all([
       fetchProject(id),
       sb.from("posts").select("id,title,created_at,author_id,is_public,allow_download,author:profiles!author_id(username)")
         .eq("project_id", id).order("created_at", { ascending: false }),
       sb.from("comments").select("id,body,created_at,author_id,parent_id,author:profiles!author_id(username)")
         .eq("project_id", id).order("created_at", { ascending: true }),
       // 自分が閲覧を許可されている限定公開の投稿
-      session ? sb.from("post_viewers").select("post_id").eq("user_id", session.user.id) : Promise.resolve({ data: [] })
+      session ? sb.from("post_viewers").select("post_id").eq("user_id", session.user.id) : Promise.resolve({ data: [] }),
+      // この企画で投稿できるHTMLの数の上限（ファイルがあれば3個、なければ6個。SQL未更新なら null）
+      sb.rpc("project_post_limit", { p_project: id })
     ]);
     if (!project) return notFound();
+    const postLimit = limitRes && typeof limitRes.data === "number" ? limitRes.data : null;
     if (postsRes.error) throw postsRes.error;
     const posts = postsRes.data;
     const isOwner = !!session && (project.owner_id === session.user.id || isAdmin);
@@ -1894,7 +1904,7 @@
     // 添付ファイル（画像・音声）のある投稿
     const hasAssets = new Set();
     if (posts.length) {
-      const ar = await sb.from("post_assets").select("post_id").in("post_id", posts.map(p => p.id));
+      const ar = await sb.from("asset_targets").select("post_id").in("post_id", posts.map(p => p.id));
       (ar.data || []).forEach(a => hasAssets.add(a.post_id));
     }
     // 画面の出し分け用（実際にコードが渡されるかどうかは、データベース側が判定する）
@@ -1904,7 +1914,8 @@
     zipBtn.addEventListener("click", () => busy(zipBtn, () => downloadProjectZip(project, posts.length)));
 
     let postAction;
-    if (canPost(project)) postAction = h("a", { class: "btn primary", href: `#/project/${id}/new` }, "＋ コードを投稿");
+    if (canPost(project) && postLimit !== null && posts.length >= postLimit) postAction = h("span", { class: "badge lock", title: "画像・音声のファイルがある企画は3個まで、ない企画は6個までです" }, `HTMLの上限（${postLimit}個）に達しています`);
+    else if (canPost(project)) postAction = h("a", { class: "btn primary", href: `#/project/${id}/new` }, "＋ コードを投稿");
     else if (!session && project.allow_others_post) postAction = h("a", { class: "btn primary", href: "#/login" }, "ログインして投稿");
 
     // 投稿一覧（まとめて削除モード付き）
@@ -1998,7 +2009,7 @@
           pick,
           h("div", { class: "info" },
             h("h3", {}, h("a", { href: `#/post/${p.id}` }, p.title), p.is_public === false ? h("span", { class: "badge lock", style: "margin-left:.5rem" }, visible ? "🔒 限定公開" : "🔒 限定公開（閲覧不可）") : null),
-            h("div", { class: "meta" }, nameTag(p.author && p.author.username), h("span", {}, fmtDate(p.created_at)), hasAssets.has(p.id) ? h("span", { title: "画像・音声の添付あり" }, "📎 添付あり") : null)),
+            h("div", { class: "meta" }, nameTag(p.author && p.author.username), h("span", {}, fmtDate(p.created_at)), hasAssets.has(p.id) ? h("span", { title: "画像・音声を使っています" }, "🖼 画像・音声あり") : null)),
           h("div", { class: "actions" },
             h("a", { class: "btn small", href: `#/post/${p.id}` }, "開く"),
             dlBtn)));
@@ -2017,9 +2028,10 @@
               h("span", {}, fmtDate(project.created_at)))),
           h("div", { class: "actions" }, zipBtn, canEditProject ? h("a", { class: "btn", href: `#/project/${id}/edit` }, "⚙ 設定") : null)),
         project.description ? h("p", { style: "white-space:pre-wrap;margin:0" }, project.description) : null),
-      h("div", { class: "page-head" }, h("h2", {}, `投稿（${posts.length}）`), h("div", { class: "actions" }, bulkBtn, postAction)),
+      h("div", { class: "page-head" }, h("h2", {}, postLimit !== null ? `投稿（${posts.length} / 上限${postLimit}）` : `投稿（${posts.length}）`), h("div", { class: "actions" }, bulkBtn, postAction)),
       bulkBar,
       list,
+      canManageAssets(project) ? assetManager(project, posts) : null,
       commentsSection(project, commentsRes));
   }
 
@@ -2033,59 +2045,64 @@
     return h("div", { class: "card" }, h("h2", {}, "見つかりませんでした"), h("a", { href: "#/" }, "トップへ戻る"));
   }
 
-  // 投稿フォームの「画像・音声の添付」欄
-  function assetPicker(post) {
-    const node = h("div", { class: "assets-box" });
-    const existing = [];     // 保存済みの添付（{id,name,mime,size}）
-    let existingFull = [];   // プレビュー用（中身つき）
-    const picks = [];        // これから添付するファイル（{file,name,size,req}）
-    let myReqs = [];
-    const list = h("div", { class: "asset-list" });
-    const input = h("input", { type: "file", multiple: true, accept: "image/*,audio/*,.png,.jpg,.jpeg,.gif,.webp,.bmp,.ico,.avif,.mp3,.wav,.ogg,.m4a,.aac,.flac,.opus" });
+  /* ======================================================
+   * 企画の画像・音声ファイル（企画ページで登録 → 使うHTML（投稿）を選ぶ）
+   * ==================================================== */
+  const canManageAssets = project => !!session && (project.owner_id === session.user.id || isAdmin || !!(project.myCollab && project.myCollab.can_post));
+  const assetIcon = n => (isAudioName(n) ? "🎵" : "🖼");
+  const postLabel = p => p.title + (p.is_public === false ? " 🔒" : "");
 
-    async function loadReqs() {
-      const { data } = await sb.from("asset_requests").select("id,file_name,size_bytes,status,limit_bytes")
-        .eq("user_id", session.user.id).order("created_at", { ascending: false });
-      myReqs = data || [];
-    }
-    // ファイルの状態：ok / approved / pending / rejected / need / bad
+  // 「使うHTML」のチェック一覧。onChange(新しい選択の集合) を返す
+  function postChecks(posts, selected, onChange, opts) {
+    opts = opts || {};
+    const box = h("div", { class: "target-list" });
+    const cbs = posts.map(p => {
+      const cb = h("input", { type: "checkbox" });
+      cb.checked = selected.has(p.id);
+      cb.addEventListener("change", () => {
+        const next = new Set(posts.filter((_, i) => cbs[i].checked).map(x => x.id));
+        onChange(next, cb);
+      });
+      box.append(h("label", { class: "perm" }, cb, " " + postLabel(p)));
+      return cb;
+    });
+    if (!posts.length) box.append(h("span", { class: "muted" }, "この企画には、まだHTML（投稿）がありません。"));
+    return { node: box, set(ids) { posts.forEach((p, i) => { cbs[i].checked = ids.has(p.id); }); }, get: () => new Set(posts.filter((_, i) => cbs[i].checked).map(x => x.id)) };
+  }
+
+  // 企画ページ：ファイルの登録のしかた（アップロード欄）
+  function assetUploader(ctx) {
+    const node = h("div", { class: "asset-upload" });
+    const picks = [];
+    const input = h("input", { type: "file", multiple: true, accept: "image/*,audio/*,.png,.jpg,.jpeg,.gif,.webp,.bmp,.ico,.avif,.mp3,.wav,.ogg,.m4a,.aac,.flac,.opus" });
+    const groupSel = h("select", { "aria-label": "入れるグループ" });
+    const list = h("div", { class: "asset-list" });
+    const upBtn = h("button", { class: "btn primary", type: "button" }, "⬆ ファイルを登録する");
+    let checks = null;
+    const targetBox = h("div", { class: "upload-targets" });
+
     function stateOf(it) {
-      const dup = existing.some(e => e.name === it.name) || picks.some(p => p !== it && p.name === it.name);
+      const dup = ctx.getAssets().some(e => e.name === it.name) || picks.some(p => p !== it && p.name === it.name);
       if (!assetNameOk(it.name)) return { kind: "bad", text: "使えないファイル名か、種類です（画像・音声のみ。名前に / \\ : * ? \" < > | は使えません）" };
       if (dup) return { kind: "bad", text: "同じ名前のファイルがあります" };
       if (it.size > ASSET_MAX) return { kind: "bad", text: "1ファイル3MBまでです" };
       if (it.size <= ASSET_FREE || isAdmin) return { kind: "ok" };
-      const appr = myReqs.find(r => r.status === "approved" && r.file_name === it.name && it.size <= r.limit_bytes
+      const reqs = ctx.getReqs();
+      const appr = reqs.find(r => r.status === "approved" && r.file_name === it.name && it.size <= r.limit_bytes
         && !picks.some(p => p !== it && p.req && p.req.id === r.id));
       if (appr) return { kind: "approved", req: appr };
-      if (myReqs.some(r => r.status === "pending" && r.file_name === it.name && r.size_bytes === it.size)) return { kind: "pending" };
-      const rej = myReqs.find(r => r.status === "rejected" && r.file_name === it.name && r.size_bytes === it.size);
+      if (reqs.some(r => r.status === "pending" && r.file_name === it.name && r.size_bytes === it.size)) return { kind: "pending" };
+      const rej = reqs.find(r => r.status === "rejected" && r.file_name === it.name && r.size_bytes === it.size);
       return { kind: rej ? "rejected" : "need" };
     }
 
-    function draw() {
+    function drawPicks() {
       list.replaceChildren();
-      existing.forEach(a => {
-        const del = h("button", { class: "btn small danger", type: "button" }, "削除");
-        del.addEventListener("click", () => {
-          if (!confirm(`「${a.name}」を削除します。よろしいですか？`)) return;
-          busy(del, async () => {
-            const { error } = await sb.from("post_assets").delete().eq("id", a.id);
-            if (error) throw error;
-            existing.splice(existing.indexOf(a), 1);
-            existingFull = existingFull.filter(x => x.id !== a.id);
-            draw();
-          });
-        });
-        list.append(h("div", { class: "asset-row" },
-          h("span", { class: "asset-fname" }, "📎 " + a.name), h("span", { class: "muted" }, fmtSize(a.size)),
-          h("span", { class: "badge open" }, "添付済み"), del));
-      });
       picks.forEach(it => {
         const st = stateOf(it);
         it.req = st.kind === "approved" ? st.req : null;
         const rm = h("button", { class: "btn small", type: "button" }, "外す");
-        rm.addEventListener("click", () => { picks.splice(picks.indexOf(it), 1); draw(); });
+        rm.addEventListener("click", () => { picks.splice(picks.indexOf(it), 1); drawPicks(); });
         const right = [];
         if (st.kind === "ok") right.push(h("span", { class: "badge open" }, "OK"));
         if (st.kind === "approved") right.push(h("span", { class: "badge open" }, `✓ 管理者が許可済み（${fmtSize(st.req.limit_bytes)}まで）`));
@@ -2096,72 +2113,326 @@
           ask.addEventListener("click", () => busy(ask, async () => {
             const { error } = await sb.rpc("request_asset_upload", { p_name: it.name, p_size: it.size });
             if (error) throw error;
-            await loadReqs();
+            await ctx.reloadReqs();
             toast("管理者に許可を要請しました。許可されると通知が届きます");
-            draw();
+            drawPicks();
           }));
           right.push(st.kind === "rejected" ? h("span", { class: "badge lock" }, "却下されました") : h("span", { class: "badge" }, "500KB超：管理者の許可が必要"), ask);
         }
         list.append(h("div", { class: "asset-row" },
-          h("span", { class: "asset-fname" }, "🆕 " + it.name), h("span", { class: "muted" }, fmtSize(it.size)), ...right, rm));
+          h("span", { class: "asset-fname" }, assetIcon(it.name) + " " + it.name), h("span", { class: "muted" }, fmtSize(it.size)), ...right, rm));
       });
-      if (!existing.length && !picks.length) list.append(h("p", { class: "muted", style: "margin:.3rem 0" }, "添付ファイルはありません。"));
+      upBtn.classList.toggle("hidden", !picks.length);
     }
+
+    // グループを選んだら、そのグループのファイルが共通して使っているHTMLを、最初から選んでおく
+    function inheritTargets() {
+      const gid = groupSel.value;
+      const mates = ctx.getAssets().filter(a => gid && a.group_id === gid);
+      if (!mates.length || !checks) return;
+      let common = null;
+      mates.forEach(a => { const t = ctx.getTargets(a.id); common = common ? new Set([...common].filter(x => t.has(x))) : new Set(t); });
+      checks.set(common || new Set());
+    }
+    groupSel.addEventListener("change", inheritTargets);
 
     input.addEventListener("change", () => {
       [...input.files].forEach(f => {
-        if (existing.length + picks.length >= ASSET_COUNT_MAX) { toast(`添付できるのは、1投稿につき${ASSET_COUNT_MAX}ファイルまでです`, true); return; }
+        if (ctx.getAssets().length + picks.length >= ASSET_COUNT_MAX) { toast(`登録できるのは、1企画につき${ASSET_COUNT_MAX}ファイルまでです`, true); return; }
         picks.push({ file: f, name: f.name, size: f.size, req: null });
       });
       input.value = "";
-      draw();
+      drawPicks();
     });
 
-    node.append(
-      h("h3", {}, "📎 画像・音声ファイルの添付（任意）"),
-      h("p", { class: "muted", style: "margin:.2rem 0 .6rem" },
-        "png / jpg / gif / webp、mp3 / wav / ogg などを添付できます。HTMLの中では、ファイル名のまま書けば参照されます（例：",
-        h("code", {}, '<img src="photo.png">'), "）。1ファイル500KBまではそのまま添付できます。500KBを超えるファイルは、ファイルごとに管理者の許可が必要です（申請した大きさの5％増しまで・最大3MB）。添付ファイルがある投稿は、ダウンロードがZIPだけになります。"),
-      input, list);
-    draw();
-    // 保存済みの添付と、自分の要請の状況を読み込む
-    if (session) {
-      loadReqs().then(draw);
-      if (post) {
-        sb.from("post_assets").select("id,name,mime,size").eq("post_id", post.id).order("created_at").then(r => { (r.data || []).forEach(a => existing.push(a)); draw(); });
-        sb.rpc("get_post_assets", { p_post: post.id }).then(r => { existingFull = r.data || []; });
+    upBtn.addEventListener("click", () => busy(upBtn, async () => {
+      if (ctx.getPostCount() > 3) throw new Error("HTMLが4個以上ある企画には、画像・音声を登録できません（ファイルがある企画は、HTMLを3個までです）。");
+      for (const it of picks) {
+        const st = stateOf(it);
+        if (st.kind === "bad") throw new Error(`「${it.name}」：${st.text}`);
+        if (st.kind === "pending") throw new Error(`「${it.name}」は、管理者の許可待ちです。許可されると通知が届きます。それまでは、そのファイルを外してください。`);
+        if (st.kind === "need" || st.kind === "rejected") throw new Error(`「${it.name}」は500KBを超えています。「管理者に許可を要請」を押すか、そのファイルを外してください。`);
       }
-    }
+      const targets = checks ? [...checks.get()] : [];
+      let done = 0, failed = null;
+      for (const it of [...picks]) {
+        const st = stateOf(it);
+        try {
+          const b64 = await fileToB64(it.file);
+          const { error } = await sb.rpc("add_project_asset", {
+            p_project: ctx.project.id, p_name: it.name, p_b64: b64,
+            p_request: st.kind === "approved" ? st.req.id : null,
+            p_group: groupSel.value || null, p_posts: targets
+          });
+          if (error) throw error;
+          picks.splice(picks.indexOf(it), 1);
+          done++;
+        } catch (e) { failed = `「${it.name}」を登録できませんでした：${friendly(e)}`; break; }
+      }
+      if (done) toast(`${done}個のファイルを登録しました`);
+      await ctx.onChanged();
+      await ctx.reloadReqs();
+      drawPicks();
+      if (failed) throw new Error(failed);
+    }));
+
+    node.append(
+      h("h3", {}, "⬆ ファイルを登録"),
+      h("p", { class: "muted", style: "margin:.2rem 0 .6rem" },
+        "png / jpg / gif / webp、mp3 / wav / ogg などを登録できます。1ファイル500KBまではそのまま登録できます。500KBを超えるファイルは、ファイルごとに管理者の許可が必要です（申請した大きさの5％増しまで・最大3MB）。"),
+      input,
+      h("div", { class: "upload-opts" }, h("label", {}, "入れるグループ：", groupSel)),
+      targetBox, list, h("div", { class: "actions" }, upBtn));
+    drawPicks();
 
     return {
       node,
-      count: () => picks.length,
-      // 保存前の確認：許可が必要なファイルが残っていないか
-      validate() {
-        for (const it of picks) {
-          const st = stateOf(it);
-          if (st.kind === "bad") throw new Error(`添付ファイル「${it.name}」：${st.text}`);
-          if (st.kind === "pending") throw new Error(`「${it.name}」は、管理者の許可待ちです。許可されると通知が届きます。それまでは、そのファイルを外して投稿してください。`);
-          if (st.kind === "need" || st.kind === "rejected") throw new Error(`「${it.name}」は500KBを超えています。「管理者に許可を要請」を押すか、そのファイルを外してください。`);
-        }
+      refresh() {
+        const cur = groupSel.value;
+        groupSel.replaceChildren(h("option", { value: "" }, "グループなし"), ...ctx.getGroups().map(g => h("option", { value: g.id }, g.name)));
+        groupSel.value = ctx.getGroups().some(g => g.id === cur) ? cur : "";
+        const posts = ctx.getPosts();
+        const prev = checks ? checks.get() : new Set();
+        checks = postChecks(posts, prev, () => {});
+        targetBox.replaceChildren(h("div", { class: "muted", style: "margin:.4rem 0 .2rem" }, "使うHTML（登録するファイルを入れるHTML。あとからでも変えられます）："), checks.node);
+        drawPicks();
+      }
+    };
+  }
+
+  // 企画ページ：登録済みファイルの管理（グループ分け・使うHTMLの選択）
+  function assetManager(project, posts) {
+    const root = h("div", { class: "card assets-manager" });
+    let groups = [], assets = [], targets = new Map(), myReqs = [];
+    const head = h("div", {});
+    const listBox = h("div", { class: "asset-groups" });
+    const tgt = id => targets.get(id) || new Set();
+    const titleOf = id => { const p = posts.find(x => x.id === id); return p ? p.title : "?"; };
+
+    async function reloadReqs() {
+      const { data } = await sb.from("asset_requests").select("id,file_name,size_bytes,status,limit_bytes")
+        .eq("user_id", session.user.id).order("created_at", { ascending: false });
+      myReqs = data || [];
+    }
+    async function load() {
+      const [g, a] = await Promise.all([
+        sb.from("asset_groups").select("id,name").eq("project_id", project.id).order("created_at"),
+        sb.from("project_assets").select("id,group_id,name,mime,size,created_at").eq("project_id", project.id).order("created_at")]);
+      if (g.error) throw g.error;
+      if (a.error) throw a.error;
+      groups = g.data || [];
+      assets = a.data || [];
+      targets = new Map(assets.map(x => [x.id, new Set()]));
+      if (assets.length) {
+        const t = await sb.from("asset_targets").select("asset_id,post_id").in("asset_id", assets.map(x => x.id));
+        if (t.error) throw t.error;
+        (t.data || []).forEach(r => { if (targets.has(r.asset_id)) targets.get(r.asset_id).add(r.post_id); });
+      }
+      render();
+    }
+
+    const uploader = assetUploader({
+      project, getAssets: () => assets, getGroups: () => groups, getTargets: tgt, getPosts: () => posts,
+      getPostCount: () => posts.length, getReqs: () => myReqs, reloadReqs, onChanged: load
+    });
+
+    function groupSection(g, items) {
+      const sec = h("div", { class: "asset-group" });
+      const bar = h("div", { class: "asset-group-head" }, h("strong", {}, g ? "📁 " + g.name : "📂 グループなし"), h("span", { class: "muted" }, `（${items.length}）`));
+      if (g) {
+        const ren = h("button", { class: "btn small", type: "button" }, "名前を変える");
+        ren.addEventListener("click", () => {
+          const nm = prompt("グループの新しい名前（30文字まで）", g.name);
+          if (nm === null) return;
+          busy(ren, async () => {
+            const { error } = await sb.rpc("rename_asset_group", { p_group: g.id, p_name: nm });
+            if (error) throw error;
+            await load();
+          });
+        });
+        const del = h("button", { class: "btn small danger", type: "button" }, "グループを削除");
+        del.addEventListener("click", () => {
+          if (!confirm(`グループ「${g.name}」を削除します。中のファイルは消えず、「グループなし」になります。よろしいですか？`)) return;
+          busy(del, async () => {
+            const { error } = await sb.rpc("delete_asset_group", { p_group: g.id });
+            if (error) throw error;
+            await load();
+          });
+        });
+        bar.append(h("span", { class: "grow" }), ren, del);
+      }
+      sec.append(bar);
+      // グループ全体の使うHTMLを、まとめて設定
+      if (g && items.length) {
+        const all = posts.filter(p => items.every(a => tgt(a.id).has(p.id))).map(p => p.id);
+        const pc = postChecks(posts, new Set(all), () => {});
+        const apply = h("button", { class: "btn small primary", type: "button" }, "グループの全ファイルに適用");
+        apply.addEventListener("click", () => {
+          if (!confirm(`グループ「${g.name}」の全${items.length}ファイルが使うHTMLを、選んだものにそろえます（個別に選んでいた内容は上書きされます）。よろしいですか？`)) return;
+          busy(apply, async () => {
+            const { error } = await sb.rpc("set_asset_targets", { p_assets: items.map(a => a.id), p_posts: [...pc.get()] });
+            if (error) throw error;
+            toast("グループの全ファイルに適用しました");
+            await load();
+          });
+        });
+        sec.append(h("details", { class: "targets group-targets" },
+          h("summary", {}, "このグループ全体で使うHTMLを、まとめて選ぶ"), pc.node,
+          h("div", { class: "actions", style: "margin-top:.4rem" }, apply)));
+      }
+      if (!items.length) sec.append(h("p", { class: "muted", style: "margin:.3rem 0" }, "ファイルがありません。上の「入れるグループ」でこのグループを選んで登録するか、下のファイルのグループ欄から移してください。"));
+      items.forEach(a => sec.append(fileRow(a)));
+      return sec;
+    }
+
+    function fileRow(a) {
+      const wrap = h("div", { class: "asset-file" });
+      const gs = h("select", { "aria-label": "グループ" }, h("option", { value: "" }, "グループなし"), ...groups.map(g => h("option", { value: g.id }, g.name)));
+      gs.value = a.group_id || "";
+      gs.addEventListener("change", () => busy(gs, async () => {
+        const { error } = await sb.rpc("move_assets_to_group", { p_assets: [a.id], p_group: gs.value || null });
+        if (error) { gs.value = a.group_id || ""; throw error; }
+        await load();
+      }));
+      const del = h("button", { class: "btn small danger", type: "button" }, "削除");
+      del.addEventListener("click", () => {
+        if (!confirm(`「${a.name}」を削除します。使っているHTMLからも外れます。よろしいですか？`)) return;
+        busy(del, async () => {
+          const { error } = await sb.rpc("delete_project_asset", { p_asset: a.id });
+          if (error) throw error;
+          await load();
+        });
+      });
+      const summary = h("summary", {});
+      const sumText = () => {
+        const ids = [...tgt(a.id)];
+        summary.textContent = ids.length ? "使うHTML：" + ids.map(titleOf).join("、") : "使うHTML：なし（どのHTMLのプレビュー・ダウンロードにも入りません）";
+        summary.classList.toggle("none", !ids.length);
+      };
+      sumText();
+      const pc = postChecks(posts, tgt(a.id), async (next, cb) => {
+        cb.disabled = true;
+        const { error } = await sb.rpc("set_asset_targets", { p_assets: [a.id], p_posts: [...next] });
+        cb.disabled = false;
+        if (error) { pc.set(tgt(a.id)); toast(friendly(error), true); return; }
+        targets.set(a.id, next);
+        sumText();
+        toast("使うHTMLを変更しました");
+      });
+      wrap.append(
+        h("div", { class: "asset-row" }, h("span", { class: "asset-fname" }, assetIcon(a.name) + " " + a.name), h("span", { class: "muted" }, fmtSize(a.size)), h("span", { class: "grow" }), gs, del),
+        h("details", { class: "targets" }, summary, pc.node));
+      return wrap;
+    }
+
+    function render() {
+      const limit = assets.length ? 3 : 6;
+      head.replaceChildren(
+        h("p", { class: "notice" },
+          `HTMLの数の上限：ファイルがある企画は3個まで、ない企画は6個までです（いま${posts.length}個・上限${limit}個）。`,
+          posts.length > 3 && !assets.length ? h("strong", {}, " いまはHTMLが4個以上あるので、ファイルを登録するには、HTMLを3個以下にしてください。") : null,
+          assets.length && posts.length > 3 ? h("strong", {}, " HTMLが上限を超えているため、新しいHTMLは投稿できません。") : null));
+      uploader.refresh();
+      listBox.replaceChildren();
+      if (!assets.length && !groups.length) listBox.append(h("p", { class: "muted" }, "まだファイルがありません。"));
+      groups.forEach(g => listBox.append(groupSection(g, assets.filter(a => a.group_id === g.id))));
+      const loose = assets.filter(a => !a.group_id);
+      if (loose.length) listBox.append(groupSection(null, loose));
+    }
+
+    // グループの作成
+    const gName = h("input", { type: "text", maxlength: 30, placeholder: "例）キャラ画像、効果音" });
+    const gBtn = h("button", { class: "btn", type: "button" }, "＋ グループを作る");
+    const mkGroup = () => busy(gBtn, async () => {
+      const nm = gName.value.trim();
+      if (!nm) throw new Error("グループ名を入力してください。");
+      const { error } = await sb.rpc("create_asset_group", { p_project: project.id, p_name: nm });
+      if (error) throw error;
+      gName.value = "";
+      toast("グループを作りました");
+      await load();
+    });
+    gBtn.addEventListener("click", mkGroup);
+    gName.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); mkGroup(); } });
+
+    root.append(
+      h("h2", {}, "🖼 画像・音声ファイル"),
+      h("p", { class: "muted", style: "margin-top:0" },
+        "ファイルは、HTMLではなく企画に登録します。ファイルごとに「使うHTML」を選ぶと、そのHTMLのプレビューとZIPダウンロードに、ファイルが入ります（HTMLの中ではファイル名のまま書けます：", h("code", {}, '<img src="photo.png">'), "）。ファイルは「グループ」に分けて管理できます。"),
+      head, uploader.node,
+      h("div", { class: "group-create" }, h("strong", {}, "グループ："), gName, gBtn),
+      listBox);
+    Promise.all([reloadReqs(), load()]).then(() => render()).catch(e => root.append(h("div", { class: "error-box" }, "ファイルの一覧を読み込めませんでした：" + friendly(e) + "（データベースの更新が済んでいない可能性があります）")));
+    return root;
+  }
+
+  // 投稿フォーム：この投稿（HTML）で使う画像・音声を、企画のファイルから選ぶ
+  function assetSelect(project, post) {
+    const node = h("div", { class: "assets-box" });
+    let groups = [], assets = [], chosen = new Set(), orig = new Set(), loaded = false;
+    const cache = new Map();
+    const manage = canManageAssets(project);
+
+    function draw() {
+      node.replaceChildren();
+      node.append(h("h3", {}, "🖼 この投稿で使う画像・音声"));
+      if (!assets.length) {
+        node.append(h("p", { class: "muted", style: "margin:.2rem 0" },
+          loaded ? "この企画には、使える画像・音声がありません。" : "読み込み中…",
+          loaded && manage && project.id ? h("span", {}, " ファイルは、企画ページの「画像・音声ファイル」で登録できます。") : null));
+        return;
+      }
+      node.append(h("p", { class: "muted", style: "margin:.2rem 0 .6rem" },
+        "企画に登録されたファイルから、このHTMLで使うものを選びます。選んだファイルは、このHTMLのプレビューとZIPダウンロードに入ります（HTMLの中ではファイル名のまま書けます）。"));
+      const secs = [...groups.map(g => ({ name: "📁 " + g.name, items: assets.filter(a => a.group_id === g.id) })), { name: "📂 グループなし", items: assets.filter(a => !a.group_id) }];
+      secs.forEach(s => {
+        if (!s.items.length) return;
+        const sec = h("div", { class: "asset-group" });
+        const allOn = s.items.every(a => chosen.has(a.id));
+        const toggle = h("button", { class: "btn small", type: "button" }, allOn ? "すべて外す" : "すべて選ぶ");
+        toggle.addEventListener("click", () => { s.items.forEach(a => (allOn ? chosen.delete(a.id) : chosen.add(a.id))); draw(); });
+        sec.append(h("div", { class: "asset-group-head" }, h("strong", {}, s.name), h("span", { class: "grow" }), toggle));
+        s.items.forEach(a => {
+          const cb = h("input", { type: "checkbox" });
+          cb.checked = chosen.has(a.id);
+          cb.addEventListener("change", () => { if (cb.checked) chosen.add(a.id); else chosen.delete(a.id); draw(); });
+          sec.append(h("label", { class: "asset-pick" }, cb, h("span", { class: "asset-fname" }, assetIcon(a.name) + " " + a.name), h("span", { class: "muted" }, fmtSize(a.size))));
+        });
+        node.append(sec);
+      });
+    }
+    draw();
+    if (session) {
+      Promise.all([
+        sb.from("asset_groups").select("id,name").eq("project_id", project.id).order("created_at"),
+        sb.from("project_assets").select("id,group_id,name,mime,size,created_at").eq("project_id", project.id).order("created_at"),
+        post ? sb.from("asset_targets").select("asset_id").eq("post_id", post.id) : Promise.resolve({ data: [] })
+      ]).then(([g, a, t]) => {
+        groups = g.data || []; assets = a.data || [];
+        orig = new Set((t.data || []).map(x => x.asset_id).filter(id => assets.some(x => x.id === id)));
+        chosen = new Set(orig);
+        loaded = true; draw();
+      }).catch(() => { loaded = true; draw(); });
+    }
+    const changed = () => chosen.size !== orig.size || [...chosen].some(id => !orig.has(id));
+    return {
+      node,
+      changed,
+      // 保存した投稿に、選んだファイルを紐づける
+      async save(postId) {
+        if (!loaded || !changed()) return;
+        const { error } = await sb.rpc("set_post_assets", { p_post: postId, p_assets: [...chosen] });
+        if (error) throw error;
       },
-      // 投稿を保存したあとに、ファイルを1つずつ添付する
-      async uploadAll(postId) {
-        for (const it of picks) {
-          const st = stateOf(it);
-          const b64 = await fileToB64(it.file);
-          const { error } = await sb.rpc("add_post_asset", { p_post: postId, p_name: it.name, p_b64: b64, p_request: st.kind === "approved" ? st.req.id : null });
-          if (error) throw Object.assign(new Error(`「${it.name}」を添付できませんでした：${friendly(error)}`), { assetFail: true });
-        }
-      },
-      // プレビュー用：保存済み＋これから添付するファイル（中身つき）
+      // プレビュー用：選んだファイルの中身
       async previewAssets() {
-        const fresh = [];
-        for (const it of picks) {
-          if (!assetNameOk(it.name) || it.size > ASSET_MAX) continue;
-          fresh.push({ name: it.name, mime: it.file.type || "application/octet-stream", b64: await fileToB64(it.file) });
+        const need = [...chosen].filter(id => !cache.has(id));
+        for (let i = 0; i < need.length; i += 20) {
+          const { data, error } = await sb.rpc("get_assets_data", { p_ids: need.slice(i, i + 20) });
+          if (error) throw error;
+          (data || []).forEach(a => cache.set(a.id, a));
         }
-        return [...existingFull.filter(e => !fresh.some(f => f.name === e.name)), ...fresh];
+        return [...chosen].map(id => cache.get(id)).filter(Boolean);
       }
     };
   }
@@ -2252,7 +2523,7 @@
     }
 
     const previewBox = h("div", { class: "preview-box hidden" });
-    const assetsUI = assetPicker(post);
+    const assetsUI = assetSelect(project, post);
     const prevBtn = h("button", { class: "btn", type: "button" }, "▶ プレビュー");
     prevBtn.addEventListener("click", () => busy(prevBtn, async () => {
       const as = await assetsUI.previewAssets();
@@ -2358,7 +2629,6 @@
             throw new Error(`${k.toUpperCase()} が500KBを超えています。管理者の承認が必要です（下の「要請」から申請できます）。`);
           }
         }
-        assetsUI.validate();
         // 承認済みの回数を使う投稿（すでに大容量の投稿の編集は消費しない）
         const isBigNow = ["html", "css", "js"].some(k => row[k].length > NORMAL_MAX);
         if (isBigNow && !isAdmin && !wasBig && !confirm(`500KBを超える投稿です。大容量投稿の残り回数（${bigQuota}回）を1回消費します。よろしいですか？`)) return;
@@ -2380,8 +2650,8 @@
           const { error } = await sb.from("posts").update({ ...row, updated_at: new Date().toISOString() }).eq("id", post.id);
           if (error) throw error;
           await syncViewers(post.id);
-          try { await assetsUI.uploadAll(post.id); }
-          catch (e) { if (!e.assetFail) throw e; toast(e.message, true); route(); return; }
+          try { await assetsUI.save(post.id); }
+          catch (e) { toast("使う画像・音声を保存できませんでした：" + friendly(e), true); go(`#/post/${post.id}/edit`); return; }
           toast("保存しました");
           go(`#/post/${post.id}`);
         } else {
@@ -2391,11 +2661,10 @@
           if (error) throw error;
           if (isBigNow && !isAdmin) await refreshQuota();
           await syncViewers(newId);
-          try { await assetsUI.uploadAll(newId); }
+          try { await assetsUI.save(newId); }
           catch (e) {
-            if (!e.assetFail) throw e;
-            // 投稿そのものは保存済み。添付できなかったファイルは、編集画面から追加し直す
-            toast(e.message + "（投稿は保存されています。編集から添付し直してください）", true);
+            // 投稿そのものは保存済み。使うファイルは、編集画面から選び直す
+            toast("使う画像・音声を保存できませんでした：" + friendly(e) + "（投稿は保存されています。編集から選び直してください）", true);
             go(`#/post/${newId}/edit`);
             return;
           }
@@ -2412,6 +2681,10 @@
     const project = await fetchProject(projectId);
     if (!project) return notFound();
     if (!canPost(project)) return h("div", { class: "error-box" }, "この企画は、企画主・共同編集者のみ投稿できます。");
+    const [limRes, cntRes] = await Promise.all([sb.rpc("project_post_limit", { p_project: projectId }), sb.from("posts").select("id").eq("project_id", projectId)]);
+    const lim = limRes && typeof limRes.data === "number" ? limRes.data : null;
+    if (lim !== null && cntRes.data && cntRes.data.length >= lim)
+      return h("div", { class: "error-box" }, `この企画のHTMLは、上限（${lim}個）に達しています。画像・音声のファイルがある企画は3個まで、ない企画は6個までです。`, h("br"), h("a", { href: `#/project/${projectId}` }, "企画に戻る"));
     return postForm(project, null);
   }
 
@@ -2591,14 +2864,14 @@
         h("p", { class: "notice" }, "投稿者が書いたコードです。プレビューは隔離された領域で実行されています。ダウンロードしたコードは、内容を確認してから実行してください。"),
         tabs, body,
         assets.length ? h("div", { class: "assets-box" },
-          h("h3", {}, `📎 添付ファイル（${assets.length}）`),
-          h("p", { class: "muted", style: "margin:.2rem 0 .6rem" }, "HTMLの中では、ファイル名のまま参照できます（例：", h("code", {}, `<img src="${assets[0].name}">`), "）。"),
+          h("h3", {}, `🖼 このHTMLで使う画像・音声（${assets.length}）`),
+          h("p", { class: "muted", style: "margin:.2rem 0 .6rem" }, "企画に登録されたファイルのうち、このHTMLが使うものです。HTMLの中では、ファイル名のまま参照できます（例：", h("code", {}, `<img src="${assets[0].name}">`), "）。"),
           h("div", { class: "asset-grid" }, ...assets.map(a => h("div", { class: "asset-card" },
             isAudioName(a.name)
               ? h("audio", { controls: true, preload: "none", src: dataUri(a.mime, a.b64) })
               : h("img", { src: dataUri(a.mime, a.b64), alt: a.name, loading: "lazy" }),
             h("div", { class: "asset-name" }, a.name),
-            h("div", { class: "muted" }, fmtSize(a.size)))))) : null),
+            h("div", { class: "muted" }, fmtSize(a.size) + (a.group ? "・" + a.group : "")))))) : null),
       (post.is_public === false && (isAuthor || isOwner)) ? viewersBox(post) : null);
   }
 
