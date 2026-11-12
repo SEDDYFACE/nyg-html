@@ -53,7 +53,8 @@
     if (/already pending/i.test(m)) return "すでに要請を送信済みです。管理者の承認をお待ちください。";
     if (/already decided/i.test(m)) return "この要請は、すでに回答済みです。";
     if (/admin only/i.test(m)) return "管理者だけが行える操作です。";
-    if (/already requested/i.test(m)) return "すでに公開を要請済みです。作成者の対応をお待ちください。";
+    if (/already requested/i.test(m)) return "すでに要請済みです。相手の対応をお待ちください。";
+    if (/invalid quota/i.test(m)) return "容量の指定が正しくありません（3MBを超え、10MB以下で指定してください）。";
     if (/already public/i.test(m)) return "この投稿は、すでに閲覧できる状態です。";
     if (/cannot delete yourself/i.test(m)) return "自分自身のアカウントは削除できません。";
     if (/approval required/i.test(m)) return "500KBを超えるファイルは、管理者の許可が必要です。";
@@ -62,7 +63,7 @@
     if (/too many assets/i.test(m)) return "登録できるのは、1企画につき20ファイルまでです。";
     if (/too many posts for assets/i.test(m)) return "HTMLが4個以上ある企画には、画像・音声を登録できません（ファイルがある企画は、HTMLを3個までです）。";
     if (/too many posts/i.test(m)) { const n = (m.match(/too many posts:\s*(\d+)/i) || [])[1]; return `この企画のHTMLは、上限${n ? "（" + n + "個）" : ""}に達しています（画像・音声のファイルがある企画は3個まで、ない企画は6個までです）。`; }
-    if (/project quota/i.test(m)) return `この企画の画像・音声の容量が上限（${fmtSize(PROJECT_QUOTA)}）に達しています。使っていないファイルを削除してください。`;
+    if (/project quota/i.test(m)) return "この企画の画像・音声の容量が上限に達しています。使っていないファイルを削除するか、「容量を広げる」から管理者に許可を要請してください。";
     if (/too many groups/i.test(m)) return "グループは、1企画につき20個までです。";
     if (/duplicate group/i.test(m)) return "同じ名前のグループがすでにあります。";
     if (/invalid group name/i.test(m)) return "グループ名は1〜30文字で入力してください。";
@@ -320,7 +321,7 @@
   async function loadNotifs() {
     if (!session) { notifs = []; bellOpen = false; renderBell(); return; }
     const { data, error } = await sb.from("notifications")
-      .select("id,type,created_at,read_at,project_id,comment_id,request_id,post_id,actor_id,asset_request_id,actor:profiles!actor_id(username),project:projects(title),post:posts(title),comment:comments(body),request:big_upload_requests(status,granted,note),asset_req:asset_requests!asset_request_id(file_name,size_bytes,status,limit_bytes)")
+      .select("id,type,created_at,read_at,project_id,comment_id,request_id,post_id,actor_id,asset_request_id,quota_request_id,actor:profiles!actor_id(username),project:projects(title),post:posts(title),comment:comments(body),request:big_upload_requests(status,granted,note),asset_req:asset_requests!asset_request_id(file_name,size_bytes,status,limit_bytes),quota_req:quota_requests!quota_request_id(wanted,status)")
       .order("created_at", { ascending: false }).limit(30);
     if (error) console.error(error);
     notifs = error ? [] : data;
@@ -342,6 +343,10 @@
       return `ファイル「${r ? r.file_name : "?"}」の添付が許可されました（${r ? fmtSize(r.limit_bytes) : "?"}まで）。企画ページの「画像・音声ファイル」で、もう一度そのファイルを選んで登録してください`;
     }
     if (n.type === "asset_rejected") return `ファイル「${n.asset_req ? n.asset_req.file_name : "?"}」の添付は許可されませんでした`;
+    if (n.type === "quota_request") return `${who} さんが、企画「${n.project ? n.project.title : "?"}」の画像・音声の容量を${n.quota_req ? fmtSize(n.quota_req.wanted) : "?"}に広げる許可を要請しています`;
+    if (n.type === "quota_approved") return `企画「${n.project ? n.project.title : "?"}」の画像・音声の容量が、${n.quota_req ? fmtSize(n.quota_req.wanted) : "広げた大きさ"}に広がりました`;
+    if (n.type === "quota_rejected") return `企画「${n.project ? n.project.title : "?"}」の容量を広げる要請は、許可されませんでした`;
+    if (n.type === "project_update") return `お気に入りの企画「${n.project ? n.project.title : "?"}」に、新しいバージョンが公開されました${n.post ? "（" + n.post.title + "）" : ""}`;
     if (n.type === "verify_request") return `${who} さんが、メール認証（アカウントの認証）を要請しています`;
     if (n.type === "publish_request") return `${who} さんが、あなたの投稿「${n.post ? n.post.title : ""}」の公開を要請しています`;
     return n.type === "reply"
@@ -385,6 +390,7 @@
       else if (n.type === "publish_request") content = publishItem(n);
       else if (n.type === "verify_request") content = verifyItem(n);
       else if (n.type === "asset_request") content = assetRequestItem(n);
+      else if (n.type === "quota_request") content = quotaRequestItem(n);
       else {
         content = h("button", { class: "bell-item" + (n.read_at ? "" : " unread"), type: "button" },
           h("div", { class: "t" }, notifText(n)),
@@ -407,7 +413,8 @@
   // 回答待ちの大容量投稿の要請は、回答するまで削除できない
   function deletable(n) {
     return !(n.type === "upload_request" && n.request && n.request.status === "pending")
-        && !(n.type === "asset_request" && n.asset_req && n.asset_req.status === "pending");
+        && !(n.type === "asset_request" && n.asset_req && n.asset_req.status === "pending")
+        && !(n.type === "quota_request" && n.quota_req && n.quota_req.status === "pending");
   }
 
   async function deleteNotif(n) {
@@ -467,6 +474,34 @@
       ok.addEventListener("click", () => decide(true, ok));
       no.addEventListener("click", () => decide(false, no));
       box.append(h("div", { class: "bell-req-actions" }, ok, no));
+    } else {
+      box.append(h("div", { class: "ex" }, r.status === "rejected" ? "× 却下済み" : "✓ 許可済み"));
+    }
+    return box;
+  }
+
+  // 管理者向け：企画の画像・音声の容量を広げる許可
+  function quotaRequestItem(n) {
+    const r = n.quota_req;
+    const box = h("div", { class: "bell-item req" + (n.read_at ? "" : " unread") },
+      h("div", { class: "t" }, notifText(n)),
+      h("div", { class: "d" }, fmtDate(n.created_at)));
+    if (!r) return box;
+    if (r.status === "pending") {
+      const ok = h("button", { class: "btn small primary", type: "button" }, `許可（${fmtSize(r.wanted)}に）`);
+      const no = h("button", { class: "btn small danger", type: "button" }, "却下");
+      const open = h("button", { class: "btn small", type: "button" }, "企画を開く");
+      const decide = (approve, btn) => busy(btn, async () => {
+        const { error } = await sb.rpc("decide_quota_request", { p_id: n.quota_request_id, p_approve: approve });
+        if (error) throw error;
+        markRead(n);
+        toast(approve ? "容量を広げました" : "却下しました");
+        await loadNotifs();
+      });
+      ok.addEventListener("click", () => decide(true, ok));
+      no.addEventListener("click", () => decide(false, no));
+      open.addEventListener("click", () => { markRead(n); bellOpen = false; renderBell(); go(`#/project/${n.project_id}`); });
+      box.append(h("div", { class: "bell-req-actions" }, ok, no, open));
     } else {
       box.append(h("div", { class: "ex" }, r.status === "rejected" ? "× 却下済み" : "✓ 許可済み"));
     }
@@ -546,7 +581,7 @@
     if (!n.project_id) { renderBell(); return; }   // 承認・却下・要請の通知は、既読にするだけ
     bellOpen = false;
     renderBell();
-    const target = `#/project/${n.project_id}`;
+    const target = n.type === "project_update" && n.post_id ? `#/post/${n.post_id}` : `#/project/${n.project_id}`;
     pendingScroll = n.comment_id;
     if (location.hash === target) route(); else go(target);
   }
@@ -612,7 +647,9 @@
   const ASSET_FREE = 500000;       // 許可なしで添付できる大きさ
   const ASSET_MAX = 3000000;       // 1ファイルの上限
   const ASSET_COUNT_MAX = 20;      // 1企画あたりの数
-  const PROJECT_QUOTA = 20000000;  // 1企画あたりの容量（合計）。SQL の add_project_asset の値と同じにする
+  const QUOTA_BASE = 3000000;      // 1企画あたりの画像・音声の容量（合計）：ふだん
+  const QUOTA_MAX = 10000000;      // 管理者の許可で広げられる最大
+  const quotaOf = project => (project && project.asset_quota) || QUOTA_BASE;
   const ASSET_EXT = /\.(png|jpe?g|gif|webp|bmp|ico|avif|mp3|wav|ogg|m4a|aac|flac|opus)$/i;
   const assetNameOk = n => !!n && n.length <= 100 && !/[\\/:*?"<>|\u0000-\u001f]/.test(n) && !/^\./.test(n) && ASSET_EXT.test(n);
   const fmtSize = b => b >= 1000000 ? (b / 1000000).toFixed(2) + "MB" : Math.max(1, Math.round(b / 1000)) + "KB";
@@ -678,6 +715,27 @@
     setTimeout(() => URL.revokeObjectURL(url), 5000);
   }
 
+  // アクセス数：HTMLを開く／ダウンロードする／企画まるごとダウンロードしたときに数える（同じ人は30分に1回）
+  let memVisitor = null;
+  function visitorKey() {
+    try {
+      let k = localStorage.getItem("kh_visitor");
+      if (!k || k.length < 8) {
+        k = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : String(Math.random()).slice(2) + String(Date.now());
+        localStorage.setItem("kh_visitor", k);
+      }
+      return k;
+    } catch (e) {
+      if (!memVisitor) memVisitor = String(Math.random()).slice(2) + String(Date.now());
+      return memVisitor;
+    }
+  }
+  function recordView(projectId) {
+    if (!projectId) return;
+    Promise.resolve(sb.rpc("record_project_view", { p_project: projectId, p_key: visitorKey() }))
+      .then(r => { if (r && r.error) console.warn(r.error); }, () => {});
+  }
+
   function downloadSingleHtml(p) {
     download(safeName(p.title) + ".html", new Blob([compose(p, false)], { type: "text/html;charset=utf-8" }));
   }
@@ -709,6 +767,7 @@
       (assetRows || []).filter(a => a.post_id === p.id).forEach(a => dir.file(a.name, b64ToBytes(a.b64)));
     });
     download(safeName(project.title) + ".zip", await zip.generateAsync({ type: "blob" }));
+    recordView(project.id);
     if (total && data.length < total) toast(`限定公開の${total - data.length}件は、閲覧できないため含まれていません`);
   }
 
@@ -1151,12 +1210,14 @@
       h("div", { class: "meta" },
         openBadge(p),
         h("span", {}, "企画主 ", nameTag(p.owner && p.owner.username)),
-        h("span", {}, `投稿 ${count}件`)));
+        h("span", {}, `投稿 ${count}件`),
+        h("span", {}, `登録数 ${p.favorite_count || 0}件`),
+        h("span", {}, `アクセス数 ${p.view_count || 0}回`)));
   }
 
   async function viewHome() {
     const { data, error } = await sb.from("projects")
-      .select("id,title,description,allow_others_post,created_at,owner_id,owner:profiles!owner_id(username)")
+      .select("id,title,description,allow_others_post,created_at,owner_id,favorite_count,view_count,owner:profiles!owner_id(username)")
       .order("created_at", { ascending: false });
     if (error) throw error;
     // 投稿数は、投稿の project_id だけを取得して数える（1000件ずつ）
@@ -1884,7 +1945,7 @@
   }
 
   async function viewProject(id) {
-    const [project, postsRes, commentsRes, myViewRes, limitRes] = await Promise.all([
+    const [project, postsRes, commentsRes, myViewRes, limitRes, favRes] = await Promise.all([
       fetchProject(id),
       sb.from("posts").select("id,title,created_at,author_id,is_public,allow_download,author:profiles!author_id(username)")
         .eq("project_id", id).order("created_at", { ascending: false }),
@@ -1893,7 +1954,9 @@
       // 自分が閲覧を許可されている限定公開の投稿
       session ? sb.from("post_viewers").select("post_id").eq("user_id", session.user.id) : Promise.resolve({ data: [] }),
       // この企画で投稿できるHTMLの数の上限（ファイルがあれば3個、なければ6個。SQL未更新なら null）
-      sb.rpc("project_post_limit", { p_project: id })
+      sb.rpc("project_post_limit", { p_project: id }),
+      // 自分がお気に入りに登録しているか
+      session ? sb.from("project_favorites").select("project_id").eq("project_id", id).eq("user_id", session.user.id).limit(1) : Promise.resolve({ data: [] })
     ]);
     if (!project) return notFound();
     const postLimit = limitRes && typeof limitRes.data === "number" ? limitRes.data : null;
@@ -1979,6 +2042,7 @@
             if (!pr.data || !pr.data.can_view) throw new Error("この投稿は限定公開のため、ダウンロードできません。");
             if (!pr.data.can_download) throw new Error("この投稿は、投稿者がダウンロードを許可していません。");
             await downloadPostZip(pr.data, ar.data || []);
+            recordView(id);
           }));
         } else if (visible) {
           dlBtn = h("button", { class: "btn small", type: "button" }, "⬇ htmlとしてダウンロード");
@@ -1989,6 +2053,7 @@
             if (!data.can_view) throw new Error("この投稿は限定公開のため、ダウンロードできません。");
             if (!data.can_download) throw new Error("この投稿は、投稿者がダウンロードを許可していません。");
             downloadSingleHtml(data);
+            recordView(id);
           }));
         } else if (!session) {
           dlBtn = h("a", { class: "btn small", href: "#/login" }, "ログインして公開を要請");
@@ -2020,6 +2085,28 @@
     function draw() { drawBulkBar(); drawList(); }
     draw();
 
+    // お気に入り登録（新しいバージョンが公開されると通知が届く）
+    let isFav = !!(favRes && favRes.data && favRes.data.length);
+    const favCount = h("span", {}, "");
+    const showCounts = () => { favCount.textContent = `登録数 ${project.favorite_count || 0}件`; };
+    showCounts();
+    let favBtn;
+    if (!session) {
+      favBtn = h("a", { class: "btn", href: "#/login", title: "ログインすると、お気に入りに登録できます" }, "☆ お気に入り登録");
+    } else {
+      favBtn = h("button", { class: "btn", type: "button" });
+      const paint = () => { favBtn.textContent = isFav ? "★ お気に入り登録済み" : "☆ お気に入り登録"; favBtn.classList.toggle("fav-on", isFav); favBtn.setAttribute("aria-pressed", String(isFav)); };
+      paint();
+      favBtn.addEventListener("click", () => busy(favBtn, async () => {
+        const { data, error } = await sb.rpc("set_favorite", { p_project: id, p_on: !isFav });
+        if (error) throw error;
+        isFav = !isFav;
+        if (typeof data === "number") project.favorite_count = data;
+        paint(); showCounts();
+        toast(isFav ? "お気に入りに登録しました。新しいバージョンが公開されると通知が届きます" : "お気に入りを解除しました");
+      }));
+    }
+
     // 画像・音声ファイルの管理は、ふだんは隠しておき、ボタンを押したときだけ出す（初回に読み込む）
     let assetBtn = null, assetSlot = null;
     if (canManageAssets(project)) {
@@ -2042,8 +2129,10 @@
             h("h1", {}, project.title),
             h("div", { class: "meta" }, openBadge(project), h("span", {}, "企画主 ", nameTag(project.owner && project.owner.username)),
               project.collaborators.length ? h("span", {}, "共同編集者 ", ...project.collaborators.flatMap((c, i) => [i ? "、" : null, nameTag(c.user && c.user.username)].filter(Boolean))) : null,
-              h("span", {}, fmtDate(project.created_at)))),
-          h("div", { class: "actions" }, zipBtn, assetBtn, canEditProject ? h("a", { class: "btn", href: `#/project/${id}/edit` }, "⚙ 設定") : null)),
+              h("span", {}, fmtDate(project.created_at)),
+              h("span", {}, `投稿 ${posts.length}件`), favCount,
+              h("span", {}, `アクセス数 ${project.view_count || 0}回`))),
+          h("div", { class: "actions" }, favBtn, zipBtn, assetBtn, canEditProject ? h("a", { class: "btn", href: `#/project/${id}/edit` }, "⚙ 設定") : null)),
         project.description ? h("p", { style: "white-space:pre-wrap;margin:0" }, project.description) : null),
       assetSlot,
       h("div", { class: "page-head" }, h("h2", {}, postLimit !== null ? `投稿（${posts.length} / 上限${postLimit}）` : `投稿（${posts.length}）`), h("div", { class: "actions" }, bulkBtn, postAction)),
@@ -2164,7 +2253,7 @@
 
     upBtn.addEventListener("click", () => busy(upBtn, async () => {
       const used = ctx.getAssets().reduce((n, a) => n + (a.size || 0), 0), adding = picks.reduce((n, x) => n + x.size, 0);
-      if (used + adding > PROJECT_QUOTA) throw new Error(`この企画の容量の上限（${fmtSize(PROJECT_QUOTA)}）を超えます（いま${fmtSize(used)}、今回${fmtSize(adding)}）。ファイルを減らすか、使っていないファイルを削除してください。`);
+      if (used + adding > ctx.getQuota()) throw new Error(`この企画の容量の上限（${fmtSize(ctx.getQuota())}）を超えます（いま${fmtSize(used)}、今回${fmtSize(adding)}）。ファイルを減らす・削除するか、「容量を広げる」から管理者に許可を要請してください。`);
       if (ctx.getPostCount() > 3) throw new Error("HTMLが4個以上ある企画には、画像・音声を登録できません（ファイルがある企画は、HTMLを3個までです）。");
       for (const it of picks) {
         const st = stateOf(it);
@@ -2198,7 +2287,7 @@
     node.append(
       h("h3", {}, "⬆ ファイルを登録"),
       h("p", { class: "muted", style: "margin:.2rem 0 .6rem" },
-        "png / jpg / gif / webp、mp3 / wav / ogg などを登録できます。1ファイル500KBまではそのまま登録できます（1企画の合計は20MBまで）。500KBを超えるファイルは、ファイルごとに管理者の許可が必要です（申請した大きさの5％増しまで・最大3MB）。"),
+        "png / jpg / gif / webp、mp3 / wav / ogg などを登録できます。1ファイル500KBまではそのまま登録できます（1企画の合計は、ふだん3MBまで。管理者の許可で最大10MBまで広げられます）。500KBを超えるファイルは、ファイルごとに管理者の許可が必要です（申請した大きさの5％増しまで・最大3MB）。"),
       input,
       h("div", { class: "upload-opts" }, h("label", {}, "入れるグループ：", groupSel)),
       targetBox, list, h("div", { class: "actions" }, upBtn));
@@ -2241,6 +2330,10 @@
       if (a.error) throw a.error;
       groups = g.data || [];
       assets = a.data || [];
+      if (!isAdmin) {
+        const q = await sb.from("quota_requests").select("wanted,status").eq("project_id", project.id).eq("status", "pending").limit(1);
+        pendingQuota = q.data && q.data[0] ? q.data[0].wanted : null;
+      }
       targets = new Map(assets.map(x => [x.id, new Set()]));
       if (assets.length) {
         const t = await sb.from("asset_targets").select("asset_id,post_id").in("asset_id", assets.map(x => x.id));
@@ -2252,7 +2345,7 @@
 
     const uploader = assetUploader({
       project, getAssets: () => assets, getGroups: () => groups, getTargets: tgt, getPosts: () => posts,
-      getPostCount: () => posts.length, getReqs: () => myReqs, reloadReqs, onChanged: load
+      getPostCount: () => posts.length, getQuota: () => quotaOf(project), getReqs: () => myReqs, reloadReqs, onChanged: load
     });
 
     function groupSection(g, items) {
@@ -2344,14 +2437,39 @@
       return wrap;
     }
 
+    // 容量を広げる：一般は管理者に要請、管理者は直接変更
+    let pendingQuota = null;   // 回答待ちの要請（希望の容量）
+    function quotaControls(quota) {
+      const box = h("div", { class: "quota-ctl" });
+      const opts = (isAdmin ? [3, 5, 7, 10] : [5, 7, 10]).map(n => n * 1000000).filter(n => isAdmin ? n !== quota : n > quota);
+      if (!opts.length) return null;
+      if (!isAdmin && pendingQuota) { box.append(h("span", { class: "badge" }, `⏳ ${fmtSize(pendingQuota)}への拡大を要請中（管理者の許可待ち）`)); return box; }
+      const sel = h("select", { "aria-label": "容量" }, ...opts.map(n => h("option", { value: n }, fmtSize(n))));
+      const btn = h("button", { class: "btn small", type: "button" }, isAdmin ? "容量を変更" : "容量を広げる（管理者に要請）");
+      btn.addEventListener("click", () => busy(btn, async () => {
+        const n = parseInt(sel.value, 10);
+        const { error } = isAdmin
+          ? await sb.rpc("admin_set_asset_quota", { p_project: project.id, p_bytes: n })
+          : await sb.rpc("request_asset_quota", { p_project: project.id, p_bytes: n });
+        if (error) throw error;
+        if (isAdmin) { project.asset_quota = n; toast(`容量を${fmtSize(n)}にしました`); }
+        else { pendingQuota = n; toast("管理者に容量の拡大を要請しました。許可されると通知が届きます"); }
+        render();
+      }));
+      box.append(h("span", { class: "muted" }, isAdmin ? "容量（管理者）：" : "容量が足りないとき："), sel, btn);
+      return box;
+    }
+
     function render() {
       const limit = assets.length ? 3 : 6;
       const used = assets.reduce((n, a) => n + (a.size || 0), 0);
-      const pct = Math.min(100, Math.round(used / PROJECT_QUOTA * 100));
+      const quota = quotaOf(project);
+      const pct = Math.min(100, Math.round(used / quota * 100));
       head.replaceChildren(
         h("div", { class: "quota" + (pct >= 90 ? " warn" : "") },
-          h("div", {}, `容量：${fmtSize(used)} / ${fmtSize(PROJECT_QUOTA)}（${pct}%）　ファイル：${assets.length} / ${ASSET_COUNT_MAX}`),
-          h("div", { class: "quota-bar" }, h("div", { class: "quota-fill", style: `width:${pct}%` }))),
+          h("div", {}, `容量：${fmtSize(used)} / ${fmtSize(quota)}（${pct}%）　ファイル：${assets.length} / ${ASSET_COUNT_MAX}`),
+          h("div", { class: "quota-bar" }, h("div", { class: "quota-fill", style: `width:${pct}%` })),
+          quotaControls(quota)),
         h("p", { class: "notice" },
           `HTMLの数の上限：ファイルがある企画は3個まで、ない企画は6個までです（いま${posts.length}個・上限${limit}個）。`,
           posts.length > 3 && !assets.length ? h("strong", {}, " いまはHTMLが4個以上あるので、ファイルを登録するには、HTMLを3個以下にしてください。") : null,
@@ -2773,6 +2891,7 @@
     if (!post) return notFound();
     const isAuthor = !!session && (post.author_id === session.user.id || isAdmin);   // 管理者は編集も可
     const isOwner = !!session && (post.project.owner_id === session.user.id || isAdmin);
+    if (post.can_view) recordView(post.project.id);   // HTMLを開いた＝アクセス（同じ人は30分に1回）
 
     // 限定公開で、閲覧権限がない場合：プレビュー・コード・ダウンロードは出さず、「公開を要請」だけ出す
     if (!post.can_view) {
@@ -2805,9 +2924,9 @@
     const assets = assetData || [];
 
     const htmlBtn = h("button", { class: "btn", type: "button" }, "⬇ HTML（1ファイル）");
-    htmlBtn.addEventListener("click", () => downloadSingleHtml(post));
+    htmlBtn.addEventListener("click", () => { downloadSingleHtml(post); recordView(post.project.id); });
     const zipBtn = h("button", { class: "btn", type: "button" }, assets.length ? "⬇ ZIPでダウンロード（画像・音声つき）" : "⬇ ZIP（分割）");
-    zipBtn.addEventListener("click", () => busy(zipBtn, () => downloadPostZip(post, assets)));
+    zipBtn.addEventListener("click", () => busy(zipBtn, async () => { await downloadPostZip(post, assets); recordView(post.project.id); }));
 
     const actions = h("div", { class: "actions" });
     // 添付ファイルがあるときは、HTMLが参照できるように、ZIPだけを出す
