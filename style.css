@@ -385,3 +385,9 @@ details.targets > summary.none { color: #8a5a00; }
 .btn.fav-on { background: #fff7d6; border-color: #e6c200; color: #7a5b00; }
 .quota-ctl { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center; margin-top: .5rem; }
 .quota-ctl select { padding: .3rem .5rem; border: 1px solid var(--line); border-radius: var(--radius); background: #fff; color: var(--text); font: inherit; font-size: .88rem; }
+
+/* ---------- 管理者：画像・音声をStorageへ移す ---------- */
+.legacy-box { margin-bottom: 1rem; }
+.legacy-box h3 { margin: 0 0 .4rem; }
+.legacy-box p { margin: 0 0 .6rem; }
+.legacy-box [hidden] { display: none !important; }
