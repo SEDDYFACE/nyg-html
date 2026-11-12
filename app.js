@@ -1232,6 +1232,18 @@
 
     const search = h("input", { type: "search", class: "search", placeholder: "企画を検索…" });
     const list = h("div", { class: "grid" });
+    // 並べ替え：新しい順／アクセス数順（同数ならお気に入り数→新しい順）／お気に入り数順（同数ならアクセス数→新しい順）
+    const sortSel = h("select", { class: "sort-select", "aria-label": "並べ替え" },
+      h("option", { value: "new" }, "新しい順"),
+      h("option", { value: "views" }, "アクセス数順"),
+      h("option", { value: "favs" }, "お気に入り数順"));
+    const num = v => v || 0;
+    const byNew = (a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0);
+    const sorters = {
+      new: byNew,
+      views: (a, b) => num(b.view_count) - num(a.view_count) || num(b.favorite_count) - num(a.favorite_count) || byNew(a, b),
+      favs: (a, b) => num(b.favorite_count) - num(a.favorite_count) || num(b.view_count) - num(a.view_count) || byNew(a, b)
+    };
     let onlyMine = false;
     const mineBtn = session ? h("button", { class: "btn", type: "button" }, "自分の企画") : null;
     if (mineBtn) mineBtn.addEventListener("click", () => {
@@ -1244,18 +1256,20 @@
       const q = search.value.trim().toLowerCase();
       const items = data.filter(p => (!onlyMine || (session && p.owner_id === session.user.id)) &&
         (!q || (p.title + " " + p.description).toLowerCase().includes(q)));
+      items.sort(sorters[sortSel.value] || byNew);
       list.replaceChildren();
       if (!items.length) list.append(h("p", { class: "muted empty" }, onlyMine && !q ? "あなたが企画主の企画はまだありません。" : data.length ? "該当する企画がありません。" : "まだ企画がありません。最初の企画を作ってみましょう！"));
       items.forEach(p => list.append(projectCard(p)));
     }
     search.addEventListener("input", draw);
+    sortSel.addEventListener("change", draw);
     draw();
 
     return h("section", {},
       h("div", { class: "page-head" },
         h("h1", {}, "企画一覧"),
         session ? h("a", { class: "btn primary", href: "#/new-project" }, "＋ 企画を作る") : null),
-      h("div", { class: "search-row" }, search, mineBtn), list);
+      h("div", { class: "search-row" }, search, sortSel, mineBtn), list);
   }
 
   /* ======================================================
