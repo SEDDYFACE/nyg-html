@@ -46,7 +46,7 @@
     if (/already been registered|already registered|email_exists|email address.*already/i.test(m)) return "そのメールアドレスは、すでに使われています。";
     if (/should be different|same email/i.test(m)) return "今のメールアドレスと同じです。";
     if (/invalid.*email|email.*invalid|unable to validate email/i.test(m)) return "メールアドレスの形式が正しくありません。";
-    if (/rate limit|too many/i.test(m)) return "短時間に操作が多すぎます。しばらくしてからやり直してください。";
+    if (/rate limit|too many(?! (assets|posts))/i.test(m)) return "短時間に操作が多すぎます。しばらくしてからやり直してください。";
     if (/row-level security/i.test(m)) return "この操作を行う権限がありません。";
     if (/duplicate key/i.test(m)) return "既に使われています。";
     if (/file too large/i.test(m)) return "500KBを超えるコードは、管理者の承認が必要です（残り回数がありません）。";
@@ -72,6 +72,13 @@
     if (/duplicate asset/i.test(m)) return "同じ名前のファイルがすでに登録されています。";
     if (/invalid asset name/i.test(m)) return "ファイル名か、ファイルの種類が使えません（画像・音声のみ。名前に / \\ : * ? \" < > | は使えません）。";
     if (/invalid asset data/i.test(m)) return "ファイルの中身を読み取れませんでした。";
+    if (/upload missing/i.test(m)) return "ファイルの保存が確認できませんでした。もう一度お試しください。";
+    if (/exceeds approved size/i.test(m)) return "許可された大きさ（申請の5％増しまで）を超えています。";
+    if (/mime type|not supported/i.test(m) && /storage|bucket|mime/i.test(m)) return "このファイルの種類は保存できません（画像・音声のみ）。";
+    if (/maximum allowed size|payload too large|too large/i.test(m)) return "ファイルが大きすぎます（1つ3MBまで）。";
+    if (/row-level security|Unauthorized|not authorized/i.test(m) && /storage|bucket|object|row-level/i.test(m)) return "このファイルを保存・取り出す権限がありません。";
+    if (/resource already exists|Duplicate/i.test(m)) return "同じ場所にすでにファイルがあります。もう一度お試しください。";
+    if (/Object not found|not found/i.test(m) && /object|bucket/i.test(m)) return "ファイルが見つかりません。";
     if (/no request needed/i.test(m)) return "500KB以下のファイルは、許可なしで添付できます。";
     if (/already decided/i.test(m)) return "この要請は、すでに回答されています。";
     if (/not allowed/i.test(m)) return "この操作はできません。";
@@ -666,6 +673,42 @@
   const dataUri = (mime, b64) => `data:${mime};base64,${b64}`;
   const b64ToBytes = b64 => Uint8Array.from(atob(b64), c => c.charCodeAt(0));
 
+  // 画像・音声の中身は Supabase Storage（非公開の置き場）に入っている。データベースには、場所（path）だけがある。
+  // 見る権限は、Storage 側にも同じ決まりがあるので、見てはいけない人は取り出せない。
+  const ASSET_BUCKET = "project-assets";
+  const assetB64Cache = new Map();   // path -> base64（同じ画面の間は、取り出し直さない。ファイルは上書きされない）
+  async function fetchAssetB64(path) {
+    if (assetB64Cache.has(path)) return assetB64Cache.get(path);
+    const { data, error } = await sb.storage.from(ASSET_BUCKET).download(path);
+    if (error) throw error;
+    const b64 = await fileToB64(data);
+    assetB64Cache.set(path, b64);
+    return b64;
+  }
+  // 一覧（id・name・mime・path・b64 など）の path のものに、b64 を付けて返す。古い方式（b64つき）はそのまま
+  async function withAssetData(list) {
+    const out = (list || []).map(a => ({ ...a }));
+    const todo = out.filter(a => !a.b64 && a.path);
+    let i = 0;
+    await Promise.all(Array.from({ length: Math.min(4, todo.length) }, async () => {
+      while (i < todo.length) { const a = todo[i++]; a.b64 = await fetchAssetB64(a.path); }
+    }));
+    return out;
+  }
+  // 企画のファイルを、Storage からまとめて消す（企画・ユーザーの削除の前に呼ぶ。失敗しても、削除そのものは止めない）
+  async function purgeProjectFiles(projectId) {
+    try {
+      const bucket = sb.storage.from(ASSET_BUCKET);
+      for (let n = 0; n < 5; n++) {
+        const { data } = await bucket.list(projectId, { limit: 100 });
+        const names = (data || []).filter(o => o && o.name).map(o => `${projectId}/${o.name}`);
+        if (!names.length) break;
+        const { error } = await bucket.remove(names);
+        if (error) break;
+      }
+    } catch (e) { /* 残ったファイルは、容量を少し使うだけ */ }
+  }
+
   // HTML / CSS / JS の中の「ファイル名」を、データURIに置き換える（プレビュー用）。
   // 例：<img src="photo.png"> や url(./photo.png)、new Audio('sound.mp3')
   function inlineAssets(text, assets) {
@@ -756,7 +799,8 @@
     const { data, error } = await sb.rpc("get_project_posts", { p_project: project.id });
     if (error) throw error;
     if (!data.length) { toast(total ? "ダウンロードできる投稿がありません（限定公開のため）" : "まだ投稿がありません", true); return; }
-    const { data: assetRows } = await sb.rpc("get_project_assets", { p_project: project.id });
+    const { data: assetRaw } = await sb.rpc("get_project_assets", { p_project: project.id });
+    const assetRows = await withAssetData(assetRaw);
     const zip = new JSZip();
     data.forEach((p, i) => {
       const dir = zip.folder(String(i + 1).padStart(2, "0") + "_" + safeName(p.title));
@@ -1098,6 +1142,50 @@
   /* ======================================================
    * 管理者：ユーザー管理（ユーザー名・メールアドレスの一覧、アカウント削除）
    * ==================================================== */
+  // 管理者：データベースに残っている古い画像・音声ファイルを、Storage へ移す
+  function legacyAssetsBox() {
+    const box = h("div", { class: "card legacy-box" });
+    const msg = h("p", { class: "muted" }, "確認中…");
+    const btn = h("button", { class: "btn small", type: "button", hidden: true }, "Storageへ移す");
+    box.append(h("h3", {}, "📦 画像・音声ファイルをStorageへ移す"), msg, btn);
+    let list = [];
+    async function load() {
+      const { data, error } = await sb.rpc("admin_legacy_assets");
+      if (error) { msg.textContent = "確認できませんでした：" + friendly(error); return; }
+      list = data || [];
+      const total = list.reduce((n, a) => n + (a.size || 0), 0);
+      msg.textContent = list.length
+        ? `データベースの中に、まだ ${list.length}個（${fmtSize(total)}）のファイルがあります。Storageへ移すと、データベースの容量（無料枠0.5GB）が空きます。`
+        : "移すファイルはありません（すべてStorageに入っています）。";
+      btn.hidden = !list.length;
+    }
+    btn.addEventListener("click", () => {
+      if (!confirm(`${list.length}個のファイルを、Storageへ移します。見え方は変わりません。よろしいですか？`)) return;
+      busy(btn, async () => {
+        let done = 0, failed = null;
+        for (const a of [...list]) {
+          msg.textContent = `移しています… ${done}/${list.length}（${a.name}）`;
+          try {
+            const { data: b, error } = await sb.rpc("admin_begin_asset_move", { p_asset: a.id });
+            if (error) throw error;
+            const blob = new Blob([b64ToBytes(b.b64)], { type: b.mime });
+            const up = await sb.storage.from(ASSET_BUCKET).upload(b.path, blob, { contentType: b.mime, upsert: false, cacheControl: "31536000" });
+            // 前回の途中で保存だけ済んでいた場合は、そのまま確定に進む（大きさは、確定のときにサーバーが確かめる）
+            if (up.error && !/already exists|Duplicate/i.test(up.error.message || "")) throw up.error;
+            const fin = await sb.rpc("admin_finish_asset_move", { p_asset: a.id });
+            if (fin.error) throw fin.error;
+            done++;
+          } catch (e) { failed = `「${a.name}」で止まりました：${friendly(e)}`; break; }
+        }
+        await load();
+        if (done) toast(`${done}個のファイルをStorageへ移しました`);
+        if (failed) throw new Error(failed);
+      });
+    });
+    load();
+    return box;
+  }
+
   async function viewAdmin() {
     if (!session) return needLogin("ログインが必要です。");
     if (!isAdmin) return h("div", { class: "error-box" }, "管理者だけが開けるページです。");
@@ -1144,6 +1232,8 @@
             if (typed === null) return;
             if (typed.trim() !== r.username) { toast("ユーザー名が一致しないため、削除しませんでした", true); return; }
             busy(action, async () => {
+              const { data: theirs } = await sb.from("projects").select("id").eq("owner_id", r.user_id);
+              for (const pr of (theirs || [])) await purgeProjectFiles(pr.id);
               const { error: e2 } = await sb.rpc("admin_delete_user", { p_user: r.user_id });
               if (e2) throw e2;
               toast(`「${r.username}」を削除しました`);
@@ -1182,6 +1272,7 @@
 
     return h("section", {},
       h("div", { class: "page-head" }, h("h1", {}, "👤 ユーザー管理"), count),
+      legacyAssetsBox(),
       h("p", { class: "notice" }, "管理者だけが見られるページです。メールアドレスと本名は他の人には表示されません。取り扱いにご注意ください。",
         h("br"), "本名の確認は2段階です：①本人が入力（または管理者が登録）→ ②管理者が「確認済みにする」。登録から3日たっても本名が未入力のユーザーは、自動的に一時凍結されます（管理者は対象外）。"),
       h("div", { class: "search-row" }, search, nameFilter),
@@ -1842,6 +1933,7 @@
     delBtn.addEventListener("click", () => {
       if (!confirm("この企画と、中のすべての投稿を削除します。元に戻せません。よろしいですか？")) return;
       busy(delBtn, async () => {
+        await purgeProjectFiles(id);
         const { error } = await sb.from("projects").delete().eq("id", id);
         if (error) throw error;
         toast("企画を削除しました");
@@ -2055,7 +2147,7 @@
             if (pr.error) throw pr.error;
             if (!pr.data || !pr.data.can_view) throw new Error("この投稿は限定公開のため、ダウンロードできません。");
             if (!pr.data.can_download) throw new Error("この投稿は、投稿者がダウンロードを許可していません。");
-            await downloadPostZip(pr.data, ar.data || []);
+            await downloadPostZip(pr.data, await withAssetData(ar.data));
             recordView(id);
           }));
         } else if (visible) {
@@ -2280,13 +2372,27 @@
       for (const it of [...picks]) {
         const st = stateOf(it);
         try {
-          const b64 = await fileToB64(it.file);
-          const { error } = await sb.rpc("add_project_asset", {
-            p_project: ctx.project.id, p_name: it.name, p_b64: b64,
+          // ①予約（サーバーが権限・容量・許可を確かめる）→ ②Storageに保存 → ③確定（保存された実際の大きさを、サーバーが確かめる）
+          const reg = await sb.rpc("register_project_asset", {
+            p_project: ctx.project.id, p_name: it.name, p_size: it.size,
             p_request: st.kind === "approved" ? st.req.id : null,
             p_group: groupSel.value || null, p_posts: targets
           });
-          if (error) throw error;
+          if (reg.error) throw reg.error;
+          const slot = reg.data;
+          try {
+            const up = await sb.storage.from(ASSET_BUCKET).upload(slot.path, it.file, { contentType: slot.mime, upsert: false, cacheControl: "31536000" });
+            if (up.error) throw up.error;
+            const fin = await sb.rpc("finalize_project_asset", { p_asset: slot.id });
+            if (fin.error) throw fin.error;
+          } catch (e2) {
+            // 失敗したら、予約を取り消す（許可も元に戻る）。保存済みのファイルがあれば消す
+            try {
+              const c = await sb.rpc("cancel_project_asset", { p_asset: slot.id });
+              if (c.data) await sb.storage.from(ASSET_BUCKET).remove([c.data]);
+            } catch (e3) { /* 取り消せなかった予約は、1時間後に自動で片づく */ }
+            throw e2;
+          }
           picks.splice(picks.indexOf(it), 1);
           done++;
         } catch (e) { failed = `「${it.name}」を登録できませんでした：${friendly(e)}`; break; }
@@ -2424,8 +2530,9 @@
       del.addEventListener("click", () => {
         if (!confirm(`「${a.name}」を削除します。使っているHTMLからも外れます。よろしいですか？`)) return;
         busy(del, async () => {
-          const { error } = await sb.rpc("delete_project_asset", { p_asset: a.id });
+          const { data: path, error } = await sb.rpc("delete_project_asset", { p_asset: a.id });
           if (error) throw error;
+          if (path) { try { await sb.storage.from(ASSET_BUCKET).remove([path]); } catch (e) { /* 目録からは消えている */ } }
           await load();
         });
       });
@@ -2586,7 +2693,7 @@
         for (let i = 0; i < need.length; i += 20) {
           const { data, error } = await sb.rpc("get_assets_data", { p_ids: need.slice(i, i + 20) });
           if (error) throw error;
-          (data || []).forEach(a => cache.set(a.id, a));
+          (await withAssetData(data)).forEach(a => cache.set(a.id, a));
         }
         return [...chosen].map(id => cache.get(id)).filter(Boolean);
       }
@@ -2935,7 +3042,9 @@
 
     // 添付ファイル（画像・音声）
     const { data: assetData } = await sb.rpc("get_post_assets", { p_post: id });
-    const assets = assetData || [];
+    let assets = assetData || [];
+    try { assets = await withAssetData(assets); }
+    catch (e) { toast("画像・音声を読み込めませんでした：" + friendly(e), true); assets = assets.filter(a => a.b64); }
 
     const htmlBtn = h("button", { class: "btn", type: "button" }, "⬇ HTML（1ファイル）");
     htmlBtn.addEventListener("click", () => { downloadSingleHtml(post); recordView(post.project.id); });
