@@ -60,7 +60,6 @@
     if (/approval required/i.test(m)) return "500KBを超えるファイルは、管理者の許可が必要です。";
     if (/exceeds approved size/i.test(m)) return "許可されたファイルの大きさ（申請の5％増しまで）を超えています。";
     if (/asset too large/i.test(m)) return "ファイルは1つ3MBまでです。";
-    if (/too many assets/i.test(m)) return "登録できるのは、1企画につき20ファイルまでです。";
     if (/too many posts for assets/i.test(m)) return "HTMLが4個以上ある企画には、画像・音声を登録できません（ファイルがある企画は、HTMLを3個までです）。";
     if (/too many posts/i.test(m)) { const n = (m.match(/too many posts:\s*(\d+)/i) || [])[1]; return `この企画のHTMLは、上限${n ? "（" + n + "個）" : ""}に達しています（画像・音声のファイルがある企画は3個まで、ない企画は6個までです）。`; }
     if (/project quota/i.test(m)) return "この企画の画像・音声の容量が上限に達しています。使っていないファイルを削除するか、「容量を広げる」から管理者に許可を要請してください。";
@@ -653,7 +652,6 @@
    * ==================================================== */
   const ASSET_FREE = 500000;       // 許可なしで添付できる大きさ
   const ASSET_MAX = 3000000;       // 1ファイルの上限
-  const ASSET_COUNT_MAX = 20;      // 1企画あたりの数
   const QUOTA_BASE = 3000000;      // 1企画あたりの画像・音声の容量（合計）：ふだん
   const QUOTA_MAX = 10000000;      // 管理者の許可で広げられる最大
   const quotaOf = project => (project && project.asset_quota) || QUOTA_BASE;
@@ -2386,7 +2384,7 @@
 
     // フォルダの中から、画像・音声だけを取り出して、登録候補に加える（フォルダの中のフォルダも見る）
     function addFolder(files) {
-      const skip = { other: 0, dup: 0, over: 0 };
+      const skip = { other: 0, dup: 0 };
       let added = 0;
       const seen = new Set();
       [...files].forEach(f => {
@@ -2395,20 +2393,17 @@
         if (/(^|\/)__MACOSX\//.test(path) || /^\./.test(base) || !ASSET_EXT.test(base)) { skip.other++; return; }
         if (seen.has(base)) { skip.dup++; return; }   // フォルダ違いの同名は、最初のものだけ
         seen.add(base);
-        if (ctx.getAssets().length + picks.length >= ASSET_COUNT_MAX) { skip.over++; return; }
         picks.push({ file: f, name: base, size: f.size, req: null });
         added++;
       });
       const folder = files.length && files[0].webkitRelativePath ? files[0].webkitRelativePath.split("/")[0] : "";
-      const notes = [skip.other ? `画像・音声以外の${skip.other}個` : null, skip.dup ? `同じ名前の${skip.dup}個` : null,
-        skip.over ? `登録できる数（${ASSET_COUNT_MAX}個）を超える${skip.over}個` : null].filter(Boolean);
+      const notes = [skip.other ? `画像・音声以外の${skip.other}個` : null, skip.dup ? `同じ名前の${skip.dup}個` : null].filter(Boolean);
       if (!files.length) { toast("フォルダの中にファイルがありませんでした", true); return; }
       toast(`フォルダ${folder ? "「" + folder + "」" : ""}から、画像・音声を${added}個選びました` + (notes.length ? `（${notes.join("・")}は除きました）` : ""), !added);
     }
 
     input.addEventListener("change", () => {
       [...input.files].forEach(f => {
-        if (ctx.getAssets().length + picks.length >= ASSET_COUNT_MAX) { toast(`登録できるのは、1企画につき${ASSET_COUNT_MAX}ファイルまでです`, true); return; }
         picks.push({ file: f, name: f.name, size: f.size, req: null });
       });
       input.value = "";
@@ -2654,7 +2649,7 @@
       const pct = Math.min(100, Math.round(used / quota * 100));
       head.replaceChildren(
         h("div", { class: "quota" + (pct >= 90 ? " warn" : "") },
-          h("div", {}, `容量：${fmtSize(used)} / ${fmtSize(quota)}（${pct}%）　ファイル：${assets.length} / ${ASSET_COUNT_MAX}`),
+          h("div", {}, `容量：${fmtSize(used)} / ${fmtSize(quota)}（${pct}%）　ファイル：${assets.length}個`),
           h("div", { class: "quota-bar" }, h("div", { class: "quota-fill", style: `width:${pct}%` })),
           quotaControls(quota)),
         h("p", { class: "notice" },
