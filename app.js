@@ -811,7 +811,6 @@
       (assetRows || []).filter(a => a.post_id === p.id).forEach(a => dir.file(a.name, b64ToBytes(a.b64)));
     });
     download(safeName(project.title) + ".zip", await zip.generateAsync({ type: "blob" }));
-    recordView(project.id);
     if (total && data.length < total) toast(`限定公開の${total - data.length}件は、閲覧できないため含まれていません`);
   }
 
@@ -2078,6 +2077,7 @@
       session ? sb.from("project_favorites").select("project_id").eq("project_id", id).eq("user_id", session.user.id).limit(1) : Promise.resolve({ data: [] })
     ]);
     if (!project) return notFound();
+    recordView(id);   // 企画のページを開いた＝アクセス（同じ人は30分に1回）
     const postLimit = limitRes && typeof limitRes.data === "number" ? limitRes.data : null;
     if (postsRes.error) throw postsRes.error;
     const posts = postsRes.data;
@@ -2161,7 +2161,6 @@
             if (!pr.data || !pr.data.can_view) throw new Error("この投稿は限定公開のため、ダウンロードできません。");
             if (!pr.data.can_download) throw new Error("この投稿は、投稿者がダウンロードを許可していません。");
             await downloadPostZip(pr.data, await withAssetData(ar.data));
-            recordView(id);
           }));
         } else if (visible) {
           dlBtn = h("button", { class: "btn small", type: "button" }, "⬇ htmlとしてダウンロード");
@@ -2172,7 +2171,6 @@
             if (!data.can_view) throw new Error("この投稿は限定公開のため、ダウンロードできません。");
             if (!data.can_download) throw new Error("この投稿は、投稿者がダウンロードを許可していません。");
             downloadSingleHtml(data);
-            recordView(id);
           }));
         } else if (!session) {
           dlBtn = h("a", { class: "btn small", href: "#/login" }, "ログインして公開を要請");
@@ -2211,10 +2209,16 @@
     showCounts();
     let favBtn;
     if (!session) {
-      favBtn = h("a", { class: "btn", href: "#/login", title: "ログインすると、お気に入りに登録できます" }, "☆ お気に入り登録");
+      favBtn = h("a", { class: "fav-round", href: "#/login", title: "ログインすると、お気に入りに登録できます", "aria-label": "お気に入り登録（ログインが必要です）" }, "☆");
     } else {
-      favBtn = h("button", { class: "btn", type: "button" });
-      const paint = () => { favBtn.textContent = isFav ? "★ お気に入り登録済み" : "☆ お気に入り登録"; favBtn.classList.toggle("fav-on", isFav); favBtn.setAttribute("aria-pressed", String(isFav)); };
+      favBtn = h("button", { class: "fav-round", type: "button" });
+      const paint = () => {
+        favBtn.textContent = isFav ? "★" : "☆";
+        favBtn.classList.toggle("fav-on", isFav);
+        favBtn.setAttribute("aria-pressed", String(isFav));
+        favBtn.title = isFav ? "お気に入り登録済み（押すと解除）" : "お気に入りに登録";
+        favBtn.setAttribute("aria-label", favBtn.title);
+      };
       paint();
       favBtn.addEventListener("click", () => busy(favBtn, async () => {
         const { data, error } = await sb.rpc("set_favorite", { p_project: id, p_on: !isFav });
@@ -2245,13 +2249,13 @@
       h("div", { class: "card" },
         h("div", { class: "page-head" },
           h("div", {},
-            h("h1", {}, project.title),
+            h("div", { class: "title-row" }, h("h1", {}, project.title), favBtn),
             h("div", { class: "meta" }, openBadge(project), h("span", {}, "企画主 ", nameTag(project.owner && project.owner.username)),
               project.collaborators.length ? h("span", {}, "共同編集者 ", ...project.collaborators.flatMap((c, i) => [i ? "、" : null, nameTag(c.user && c.user.username)].filter(Boolean))) : null,
               h("span", {}, fmtDate(project.created_at)),
               h("span", {}, `投稿 ${posts.length}件`), favCount,
               h("span", {}, `アクセス数 ${project.view_count || 0}回`))),
-          h("div", { class: "actions" }, favBtn, zipBtn, assetBtn, canEditProject ? h("a", { class: "btn", href: `#/project/${id}/edit` }, "⚙ 設定") : null)),
+          h("div", { class: "actions" }, zipBtn, assetBtn, canEditProject ? h("a", { class: "btn", href: `#/project/${id}/edit` }, "⚙ 設定") : null)),
         project.description ? h("p", { style: "white-space:pre-wrap;margin:0" }, project.description) : null),
       assetSlot,
       h("div", { class: "page-head" }, h("h2", {}, postLimit !== null ? `投稿（${posts.length} / 上限${postLimit}）` : `投稿（${posts.length}）`), h("div", { class: "actions" }, bulkBtn, postAction)),
