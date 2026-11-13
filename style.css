@@ -395,8 +395,8 @@ details.targets > summary.none { color: #8a5a00; }
 /* お気に入り：企画名の右の丸いボタン */
 .title-row { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
 .title-row h1 { margin: 0; }
-.fav-round { flex: none; width: 40px; height: 40px; border-radius: 50%; border: 1px solid var(--line); background: #fff; color: #8a94a3;
-  font-size: 1.35rem; line-height: 1; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; padding: 0 0 2px; text-decoration: none;
+.fav-round { flex: none; height: 38px; padding: 0 1rem; border-radius: 999px; border: 1px solid var(--line); background: #fff; color: #5b6573;
+  font: inherit; font-size: .92rem; font-weight: 600; line-height: 1; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; text-decoration: none; white-space: nowrap;
   transition: background .15s, border-color .15s, color .15s, transform .1s; }
 .fav-round:hover { background: #fff7d6; border-color: #e6c200; color: #b88a00; }
 .fav-round:active { transform: scale(.94); }
