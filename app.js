@@ -657,7 +657,7 @@
   const QUOTA_BASE = 3000000;      // 1企画あたりの画像・音声の容量（合計）：ふだん
   const QUOTA_MAX = 10000000;      // 管理者の許可で広げられる最大
   const quotaOf = project => (project && project.asset_quota) || QUOTA_BASE;
-  const ASSET_EXT = /\.(png|jpe?g|gif|webp|bmp|ico|avif|mp3|wav|ogg|m4a|aac|flac|opus)$/i;
+  const ASSET_EXT = /\.(png|jpe?g|gif|webp|bmp|ico|avif|svg|mp3|wav|ogg|m4a|aac|flac|opus)$/i;
   const assetNameOk = n => !!n && n.length <= 100 && !/[\\/:*?"<>|\u0000-\u001f]/.test(n) && !/^\./.test(n) && ASSET_EXT.test(n);
   const fmtSize = b => b >= 1000000 ? (b / 1000000).toFixed(2) + "MB" : Math.max(1, Math.round(b / 1000)) + "KB";
   const isAudioName = n => /\.(mp3|wav|ogg|m4a|aac|flac|opus)$/i.test(n);
@@ -2318,7 +2318,7 @@
   function assetUploader(ctx) {
     const node = h("div", { class: "asset-upload" });
     const picks = [];
-    const input = h("input", { type: "file", multiple: true, accept: "image/*,audio/*,.png,.jpg,.jpeg,.gif,.webp,.bmp,.ico,.avif,.mp3,.wav,.ogg,.m4a,.aac,.flac,.opus" });
+    const input = h("input", { type: "file", multiple: true, accept: "image/*,audio/*,.png,.jpg,.jpeg,.gif,.webp,.bmp,.ico,.avif,.svg,.mp3,.wav,.ogg,.m4a,.aac,.flac,.opus" });
     // 📁 フォルダごと選ぶ（中の画像・音声だけを取り出す）
     const dirInput = h("input", { type: "file", webkitdirectory: true, directory: true, multiple: true, class: "hidden", "aria-label": "フォルダを選ぶ", tabindex: "-1" });
     const dirBtn = h("button", { class: "btn", type: "button", title: "フォルダの中の画像・音声を、まとめて選びます" }, "📁 フォルダを選ぶ");
@@ -2471,7 +2471,7 @@
     node.append(
       h("h3", {}, "⬆ ファイルを登録"),
       h("p", { class: "muted", style: "margin:.2rem 0 .6rem" },
-        "png / jpg / gif / webp、mp3 / wav / ogg などを登録できます。「📁 フォルダを選ぶ」で、画像・音声を入れたフォルダをまとめて選ぶこともできます（中の画像・音声だけを選び、フォルダの中のフォルダも見ます。パソコン向けの機能です）。1ファイル500KBまではそのまま登録できます（1企画の合計は、ふだん3MBまで。管理者の許可で最大10MBまで広げられます）。500KBを超えるファイルは、ファイルごとに管理者の許可が必要です（申請した大きさの5％増しまで・最大3MB）。"),
+        "png / jpg / gif / webp / svg、mp3 / wav / ogg などを登録できます。「📁 フォルダを選ぶ」で、画像・音声を入れたフォルダをまとめて選ぶこともできます（中の画像・音声だけを選び、フォルダの中のフォルダも見ます。パソコン向けの機能です）。1ファイル500KBまではそのまま登録できます（1企画の合計は、ふだん3MBまで。管理者の許可で最大10MBまで広げられます）。500KBを超えるファイルは、ファイルごとに管理者の許可が必要です（申請した大きさの5％増しまで・最大3MB）。"),
       h("div", { class: "pick-row" }, input, dirBtn, dirInput),
       h("div", { class: "upload-opts" }, h("label", {}, "入れるグループ：", groupSel)),
       targetBox, list, h("div", { class: "actions" }, upBtn));
