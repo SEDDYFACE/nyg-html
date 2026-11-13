@@ -2502,7 +2502,28 @@
     const master = h("input", { type: "checkbox", "aria-label": "すべてのファイルを選ぶ" });
     const bulkInfo = h("span", { class: "muted" });
     const bulkDel = h("button", { class: "btn small danger", type: "button" }, "選んだファイルを削除");
-    const bulkBar = h("div", { class: "bulk-del hidden" }, h("label", { class: "check" }, master, " すべて選ぶ"), bulkInfo, h("span", { class: "grow" }), bulkDel);
+    const moveSel = h("select", { "aria-label": "移す先のグループ" });
+    const moveBtn = h("button", { class: "btn small", type: "button" }, "グループを変更");
+    const bulkBar = h("div", { class: "bulk-del hidden" }, h("label", { class: "check" }, master, " すべて選ぶ"), bulkInfo, h("span", { class: "grow" }),
+      h("span", { class: "bulk-move" }, moveSel, moveBtn), bulkDel);
+    function fillMoveSel() {
+      const keep = moveSel.value;
+      moveSel.replaceChildren(h("option", { value: "" }, "グループなし"), ...groups.map(g => h("option", { value: g.id }, "📁 " + g.name)));
+      moveSel.value = groups.some(g => g.id === keep) ? keep : "";
+    }
+    moveBtn.addEventListener("click", () => {
+      const ids = [...selected].filter(id => assets.some(a => a.id === id));
+      if (!ids.length) return;
+      const gid = moveSel.value || null;
+      const gname = gid ? groups.find(g => g.id === gid).name : "グループなし";
+      if (!confirm(`選んだ${ids.length}個のファイルを、「${gname}」へ移します。よろしいですか？`)) return;
+      busy(moveBtn, async () => {
+        const { error } = await sb.rpc("move_assets_to_group", { p_assets: ids, p_group: gid });
+        if (error) throw error;
+        toast(`${ids.length}個のファイルを「${gname}」へ移しました`);
+        await load();
+      });
+    });
     function syncBulk() {
       const n = selected.size, total = assets.length;
       bulkBar.classList.toggle("hidden", !total);
@@ -2510,6 +2531,8 @@
       master.indeterminate = n > 0 && n < total;
       bulkInfo.textContent = n ? `${n}個を選んでいます` : "削除したいファイルにチェックを入れてください";
       bulkDel.disabled = !n;
+      moveBtn.disabled = !n;
+      moveSel.disabled = !n;
       bulkDel.textContent = n ? `選んだ${n}個のファイルを削除` : "選んだファイルを削除";
       groupBoxes.forEach(({ cb, items }) => {
         const c = items.filter(a => selected.has(a.id)).length;
@@ -2715,6 +2738,7 @@
       uploader.refresh();
       listBox.replaceChildren();
       rowBoxes = new Map(); groupBoxes = [];
+      fillMoveSel();
       [...selected].forEach(id => { if (!assets.some(a => a.id === id)) selected.delete(id); });
       if (!assets.length && !groups.length) listBox.append(h("p", { class: "muted" }, "まだファイルがありません。"));
       groups.forEach(g => listBox.append(groupSection(g, assets.filter(a => a.group_id === g.id))));
