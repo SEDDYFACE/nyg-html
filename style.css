@@ -403,3 +403,6 @@ details.targets > summary.none { color: #8a5a00; }
 .fav-round.fav-on { background: #ffe680; border-color: #e6c200; color: #8a6200; }
 .fav-round:disabled { opacity: .6; cursor: default; }
 .fav-round:focus-visible { outline: 3px solid #bcd7ff; outline-offset: 2px; }
+
+/* ファイル選択の行（ファイル／フォルダ） */
+.pick-row { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin: .4rem 0; }
