@@ -2496,6 +2496,55 @@
     const tgt = id => targets.get(id) || new Set();
     const titleOf = id => { const p = posts.find(x => x.id === id); return p ? p.title : "?"; };
 
+    // まとめて削除：チェックを入れたファイルを選ぶ
+    const selected = new Set();
+    let rowBoxes = new Map(), groupBoxes = [];
+    const master = h("input", { type: "checkbox", "aria-label": "すべてのファイルを選ぶ" });
+    const bulkInfo = h("span", { class: "muted" });
+    const bulkDel = h("button", { class: "btn small danger", type: "button" }, "選んだファイルを削除");
+    const bulkBar = h("div", { class: "bulk-del hidden" }, h("label", { class: "check" }, master, " すべて選ぶ"), bulkInfo, h("span", { class: "grow" }), bulkDel);
+    function syncBulk() {
+      const n = selected.size, total = assets.length;
+      bulkBar.classList.toggle("hidden", !total);
+      master.checked = total > 0 && n === total;
+      master.indeterminate = n > 0 && n < total;
+      bulkInfo.textContent = n ? `${n}個を選んでいます` : "削除したいファイルにチェックを入れてください";
+      bulkDel.disabled = !n;
+      bulkDel.textContent = n ? `選んだ${n}個のファイルを削除` : "選んだファイルを削除";
+      groupBoxes.forEach(({ cb, items }) => {
+        const c = items.filter(a => selected.has(a.id)).length;
+        cb.checked = items.length > 0 && c === items.length;
+        cb.indeterminate = c > 0 && c < items.length;
+      });
+      rowBoxes.forEach((cb, id) => { cb.checked = selected.has(id); });
+    }
+    master.addEventListener("change", () => {
+      if (master.checked) assets.forEach(a => selected.add(a.id)); else selected.clear();
+      syncBulk();
+    });
+    bulkDel.addEventListener("click", () => {
+      const ids = [...selected].filter(id => assets.some(a => a.id === id));
+      if (!ids.length) return;
+      const names = ids.map(id => assets.find(a => a.id === id).name);
+      if (!confirm(`選んだ${ids.length}個のファイルを削除します。\n\n${names.slice(0, 8).join("\n")}${names.length > 8 ? `\n…ほか${names.length - 8}個` : ""}\n\n使っているHTMLからも外れます。元に戻せません。よろしいですか？`)) return;
+      busy(bulkDel, async () => {
+        const paths = [];
+        let done = 0, failed = null;
+        for (const id of ids) {
+          const { data: path, error } = await sb.rpc("delete_project_asset", { p_asset: id });
+          if (error) { failed = friendly(error); break; }
+          done++; selected.delete(id);
+          if (path) paths.push(path);
+        }
+        for (let i = 0; i < paths.length; i += 100) {
+          try { await sb.storage.from(ASSET_BUCKET).remove(paths.slice(i, i + 100)); } catch (e) { /* 目録からは消えている */ }
+        }
+        await load();
+        if (failed) throw new Error(`${done}個を削除したところで止まりました：${failed}`);
+        toast(`${done}個のファイルを削除しました`);
+      });
+    });
+
     async function reloadReqs() {
       const { data } = await sb.from("asset_requests").select("id,file_name,size_bytes,status,limit_bytes")
         .eq("user_id", session.user.id).order("created_at", { ascending: false });
@@ -2529,7 +2578,10 @@
 
     function groupSection(g, items) {
       const sec = h("div", { class: "asset-group" });
-      const bar = h("div", { class: "asset-group-head" }, h("strong", {}, g ? "📁 " + g.name : "📂 グループなし"), h("span", { class: "muted" }, `（${items.length}）`));
+      const gcb = h("input", { type: "checkbox", "aria-label": (g ? g.name : "グループなし") + "のファイルをすべて選ぶ" });
+      groupBoxes.push({ cb: gcb, items });
+      gcb.addEventListener("change", () => { items.forEach(a => { if (gcb.checked) selected.add(a.id); else selected.delete(a.id); }); syncBulk(); });
+      const bar = h("div", { class: "asset-group-head" }, items.length ? gcb : null, h("strong", {}, g ? "📁 " + g.name : "📂 グループなし"), h("span", { class: "muted" }, `（${items.length}）`));
       if (g) {
         const ren = h("button", { class: "btn small", type: "button" }, "名前を変える");
         ren.addEventListener("click", () => {
@@ -2613,8 +2665,12 @@
         sumText();
         toast("使うHTMLを変更しました");
       });
+      const cb = h("input", { type: "checkbox", "aria-label": `${a.name}を選ぶ`, class: "asset-sel" });
+      cb.checked = selected.has(a.id);
+      rowBoxes.set(a.id, cb);
+      cb.addEventListener("change", () => { if (cb.checked) selected.add(a.id); else selected.delete(a.id); syncBulk(); });
       wrap.append(
-        h("div", { class: "asset-row" }, h("span", { class: "asset-fname" }, assetIcon(a.name) + " " + a.name), h("span", { class: "muted" }, fmtSize(a.size)), h("span", { class: "grow" }), gs, dlf, del),
+        h("div", { class: "asset-row" }, cb, h("span", { class: "asset-fname" }, assetIcon(a.name) + " " + a.name), h("span", { class: "muted" }, fmtSize(a.size)), h("span", { class: "grow" }), gs, dlf, del),
         h("details", { class: "targets" }, summary, pc.node));
       return wrap;
     }
@@ -2658,10 +2714,13 @@
           assets.length && posts.length > 3 ? h("strong", {}, " HTMLが上限を超えているため、新しいHTMLは投稿できません。") : null));
       uploader.refresh();
       listBox.replaceChildren();
+      rowBoxes = new Map(); groupBoxes = [];
+      [...selected].forEach(id => { if (!assets.some(a => a.id === id)) selected.delete(id); });
       if (!assets.length && !groups.length) listBox.append(h("p", { class: "muted" }, "まだファイルがありません。"));
       groups.forEach(g => listBox.append(groupSection(g, assets.filter(a => a.group_id === g.id))));
       const loose = assets.filter(a => !a.group_id);
       if (loose.length) listBox.append(groupSection(null, loose));
+      syncBulk();
     }
 
     // グループの作成
@@ -2685,7 +2744,7 @@
         "ファイルは、HTMLではなく企画に登録します。ファイルごとに「使うHTML」を選ぶと、そのHTMLのプレビューとZIPダウンロードに、ファイルが入ります（HTMLの中ではファイル名のまま書けます：", h("code", {}, '<img src="photo.png">'), "）。ファイルは「グループ」に分けて管理できます。"),
       head, uploader.node,
       h("div", { class: "group-create" }, h("strong", {}, "グループ："), gName, gBtn),
-      listBox);
+      bulkBar, listBox);
     Promise.all([reloadReqs(), load()]).then(() => render()).catch(e => root.append(h("div", { class: "error-box" }, "ファイルの一覧を読み込めませんでした：" + friendly(e) + "（データベースの更新が済んでいない可能性があります）")));
     return root;
   }
