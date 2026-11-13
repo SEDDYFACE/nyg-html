@@ -1312,26 +1312,34 @@
       .order("created_at", { ascending: false });
     if (error) throw error;
     // 投稿数は、投稿の project_id だけを取得して数える（1000件ずつ）
-    const counts = {};
+    const counts = {}, lastAct = {};
     for (let from = 0; from < 100000; from += 1000) {
-      const r = await sb.from("posts").select("project_id").order("id").range(from, from + 999);
+      const r = await sb.from("posts").select("project_id,created_at,updated_at").order("id").range(from, from + 999);
       if (r.error) break;
-      (r.data || []).forEach(x => { counts[x.project_id] = (counts[x.project_id] || 0) + 1; });
+      (r.data || []).forEach(x => {
+        counts[x.project_id] = (counts[x.project_id] || 0) + 1;
+        // 更新日時：HTMLの追加・編集のうち、いちばん新しい時刻
+        const t = (x.updated_at && x.updated_at > x.created_at) ? x.updated_at : x.created_at;
+        if (t && (!lastAct[x.project_id] || t > lastAct[x.project_id])) lastAct[x.project_id] = t;
+      });
       if (!r.data || r.data.length < 1000) break;
     }
-    data.forEach(p => { p.postCount = counts[p.id] || 0; });
+    // 企画の更新日時＝中のHTMLの最終追加・編集（HTMLがまだない企画は、企画を作った日時）
+    data.forEach(p => { p.postCount = counts[p.id] || 0; p.updated_at = (lastAct[p.id] && lastAct[p.id] > p.created_at) ? lastAct[p.id] : p.created_at; });
 
     const search = h("input", { type: "search", class: "search", placeholder: "企画を検索…" });
     const list = h("div", { class: "grid" });
-    // 並べ替え：新しい順／アクセス数順（同数ならお気に入り数→新しい順）／お気に入り数順（同数ならアクセス数→新しい順）
+    // 並べ替え：作成順／更新順／アクセス数順（同数ならお気に入り数→作成順）／お気に入り数順（同数ならアクセス数→作成順）
     const sortSel = h("select", { class: "sort-select", "aria-label": "並べ替え" },
-      h("option", { value: "new" }, "新しい順"),
+      h("option", { value: "new" }, "作成順"),
+      h("option", { value: "updated" }, "更新順"),
       h("option", { value: "views" }, "アクセス数順"),
       h("option", { value: "favs" }, "お気に入り数順"));
     const num = v => v || 0;
     const byNew = (a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0);
     const sorters = {
       new: byNew,
+      updated: (a, b) => (a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0) || byNew(a, b),
       views: (a, b) => num(b.view_count) - num(a.view_count) || num(b.favorite_count) - num(a.favorite_count) || byNew(a, b),
       favs: (a, b) => num(b.favorite_count) - num(a.favorite_count) || num(b.view_count) - num(a.view_count) || byNew(a, b)
     };
@@ -1579,6 +1587,9 @@
         await load(); box.scrollTop = box.scrollHeight;
       });
     });
+    // 画面に表示されたあとで、いちばん下（最新のメッセージ）へ移す（表示前は高さが0で、移せない）
+    const toBottom = () => { box.scrollTop = box.scrollHeight; };
+    requestAnimationFrame(() => { toBottom(); setTimeout(toBottom, 150); });
     return h("div", { class: "dm-app" },
       h("div", { class: "dm-head" },
         h("a", { class: "dm-back", href: "#/messages", "aria-label": "メッセージ一覧へ戻る" }, "←"),
@@ -1628,6 +1639,8 @@
       box.replaceChildren(...(data.length ? data.map(m => dmBubble(m, pa.id, load)) : [h("p", { class: "muted" }, "メッセージはありません。")]));
     }
     await load();
+    const toBottom = () => { box.scrollTop = box.scrollHeight; };
+    requestAnimationFrame(() => { toBottom(); setTimeout(toBottom, 150); });
     return h("div", { class: "dm-app" },
       h("div", { class: "dm-head" }, h("a", { class: "dm-back", href: "#/messages/all", "aria-label": "戻る" }, "←"),
         avatar(pa.username, "sm"), h("strong", {}, "@" + pa.username), h("span", { class: "muted" }, "と"), avatar(pb.username, "sm"), h("strong", {}, "@" + pb.username),
