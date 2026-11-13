@@ -779,8 +779,23 @@
       .then(r => { if (r && r.error) console.warn(r.error); }, () => {});
   }
 
-  function downloadSingleHtml(p) {
-    download(safeName(p.title) + ".html", new Blob([compose(p, false)], { type: "text/html;charset=utf-8" }));
+  // 画像・音声（assets）があれば、HTMLの中のファイル名をデータURIに置き換えて、1つのHTMLファイルとして動くようにする
+  function downloadSingleHtml(p, assets) {
+    const text = assets && assets.length ? inlineAssets(compose(p, false), assets) : compose(p, false);
+    download(safeName(p.title) + ".html", new Blob([text], { type: "text/html;charset=utf-8" }));
+  }
+
+  // 画像・音声を、元のファイル名のまま1つのファイルとして保存する
+  async function downloadAssetFile(a) {
+    let src = a;
+    if (!src.b64 && !src.path) {   // 管理欄の一覧には中身も場所もない。サーバーに聞く（見る権限があれば返ってくる）
+      const { data, error } = await sb.rpc("get_assets_data", { p_ids: [a.id] });
+      if (error) throw error;
+      src = (data || [])[0];
+      if (!src) throw new Error("ファイルが見つかりません。");
+    }
+    const [full] = src.b64 ? [src] : await withAssetData([src]);
+    download(a.name, new Blob([b64ToBytes(full.b64)], { type: a.mime || "application/octet-stream" }));
   }
 
   async function downloadPostZip(p, assets) {
@@ -2304,6 +2319,10 @@
     const node = h("div", { class: "asset-upload" });
     const picks = [];
     const input = h("input", { type: "file", multiple: true, accept: "image/*,audio/*,.png,.jpg,.jpeg,.gif,.webp,.bmp,.ico,.avif,.mp3,.wav,.ogg,.m4a,.aac,.flac,.opus" });
+    // 📁 フォルダごと選ぶ（中の画像・音声だけを取り出す）
+    const dirInput = h("input", { type: "file", webkitdirectory: true, directory: true, multiple: true, class: "hidden", "aria-label": "フォルダを選ぶ", tabindex: "-1" });
+    const dirBtn = h("button", { class: "btn", type: "button", title: "フォルダの中の画像・音声を、まとめて選びます" }, "📁 フォルダを選ぶ");
+    dirBtn.addEventListener("click", () => dirInput.click());
     const groupSel = h("select", { "aria-label": "入れるグループ" });
     const list = h("div", { class: "asset-list" });
     const upBtn = h("button", { class: "btn primary", type: "button" }, "⬆ ファイルを登録する");
@@ -2365,12 +2384,40 @@
     }
     groupSel.addEventListener("change", inheritTargets);
 
+    // フォルダの中から、画像・音声だけを取り出して、登録候補に加える（フォルダの中のフォルダも見る）
+    function addFolder(files) {
+      const skip = { other: 0, dup: 0, over: 0 };
+      let added = 0;
+      const seen = new Set();
+      [...files].forEach(f => {
+        const path = f.webkitRelativePath || f.name;
+        const base = f.name;
+        if (/(^|\/)__MACOSX\//.test(path) || /^\./.test(base) || !ASSET_EXT.test(base)) { skip.other++; return; }
+        if (seen.has(base)) { skip.dup++; return; }   // フォルダ違いの同名は、最初のものだけ
+        seen.add(base);
+        if (ctx.getAssets().length + picks.length >= ASSET_COUNT_MAX) { skip.over++; return; }
+        picks.push({ file: f, name: base, size: f.size, req: null });
+        added++;
+      });
+      const folder = files.length && files[0].webkitRelativePath ? files[0].webkitRelativePath.split("/")[0] : "";
+      const notes = [skip.other ? `画像・音声以外の${skip.other}個` : null, skip.dup ? `同じ名前の${skip.dup}個` : null,
+        skip.over ? `登録できる数（${ASSET_COUNT_MAX}個）を超える${skip.over}個` : null].filter(Boolean);
+      if (!files.length) { toast("フォルダの中にファイルがありませんでした", true); return; }
+      toast(`フォルダ${folder ? "「" + folder + "」" : ""}から、画像・音声を${added}個選びました` + (notes.length ? `（${notes.join("・")}は除きました）` : ""), !added);
+    }
+
     input.addEventListener("change", () => {
       [...input.files].forEach(f => {
         if (ctx.getAssets().length + picks.length >= ASSET_COUNT_MAX) { toast(`登録できるのは、1企画につき${ASSET_COUNT_MAX}ファイルまでです`, true); return; }
         picks.push({ file: f, name: f.name, size: f.size, req: null });
       });
       input.value = "";
+      drawPicks();
+    });
+    dirInput.addEventListener("change", () => {
+      const files = [...dirInput.files];
+      dirInput.value = "";
+      addFolder(files);
       drawPicks();
     });
 
@@ -2424,8 +2471,8 @@
     node.append(
       h("h3", {}, "⬆ ファイルを登録"),
       h("p", { class: "muted", style: "margin:.2rem 0 .6rem" },
-        "png / jpg / gif / webp、mp3 / wav / ogg などを登録できます。1ファイル500KBまではそのまま登録できます（1企画の合計は、ふだん3MBまで。管理者の許可で最大10MBまで広げられます）。500KBを超えるファイルは、ファイルごとに管理者の許可が必要です（申請した大きさの5％増しまで・最大3MB）。"),
-      input,
+        "png / jpg / gif / webp、mp3 / wav / ogg などを登録できます。「📁 フォルダを選ぶ」で、画像・音声を入れたフォルダをまとめて選ぶこともできます（中の画像・音声だけを選び、フォルダの中のフォルダも見ます。パソコン向けの機能です）。1ファイル500KBまではそのまま登録できます（1企画の合計は、ふだん3MBまで。管理者の許可で最大10MBまで広げられます）。500KBを超えるファイルは、ファイルごとに管理者の許可が必要です（申請した大きさの5％増しまで・最大3MB）。"),
+      h("div", { class: "pick-row" }, input, dirBtn, dirInput),
       h("div", { class: "upload-opts" }, h("label", {}, "入れるグループ：", groupSel)),
       targetBox, list, h("div", { class: "actions" }, upBtn));
     drawPicks();
@@ -2553,6 +2600,8 @@
           await load();
         });
       });
+      const dlf = h("button", { class: "btn small", type: "button", title: "このファイルを、名前そのままで保存します" }, "⬇ 保存");
+      dlf.addEventListener("click", () => busy(dlf, () => downloadAssetFile(a)));
       const summary = h("summary", {});
       const sumText = () => {
         const ids = [...tgt(a.id)];
@@ -2570,7 +2619,7 @@
         toast("使うHTMLを変更しました");
       });
       wrap.append(
-        h("div", { class: "asset-row" }, h("span", { class: "asset-fname" }, assetIcon(a.name) + " " + a.name), h("span", { class: "muted" }, fmtSize(a.size)), h("span", { class: "grow" }), gs, del),
+        h("div", { class: "asset-row" }, h("span", { class: "asset-fname" }, assetIcon(a.name) + " " + a.name), h("span", { class: "muted" }, fmtSize(a.size)), h("span", { class: "grow" }), gs, dlf, del),
         h("details", { class: "targets" }, summary, pc.node));
       return wrap;
     }
@@ -3063,14 +3112,15 @@
     try { assets = await withAssetData(assets); }
     catch (e) { toast("画像・音声を読み込めませんでした：" + friendly(e), true); assets = assets.filter(a => a.b64); }
 
-    const htmlBtn = h("button", { class: "btn", type: "button" }, "⬇ HTML（1ファイル）");
-    htmlBtn.addEventListener("click", () => { downloadSingleHtml(post); recordView(post.project.id); });
+    const htmlBtn = h("button", { class: "btn", type: "button", title: assets.length ? "画像・音声をHTMLの中に埋め込んで、1つのファイルにします" : "" },
+      assets.length ? "⬇ HTML（画像・音声を埋め込んだ1ファイル）" : "⬇ HTML（1ファイル）");
+    htmlBtn.addEventListener("click", () => { downloadSingleHtml(post, assets); recordView(post.project.id); });
     const zipBtn = h("button", { class: "btn", type: "button" }, assets.length ? "⬇ ZIPでダウンロード（画像・音声つき）" : "⬇ ZIP（分割）");
     zipBtn.addEventListener("click", () => busy(zipBtn, async () => { await downloadPostZip(post, assets); recordView(post.project.id); }));
 
     const actions = h("div", { class: "actions" });
-    // 添付ファイルがあるときは、HTMLが参照できるように、ZIPだけを出す
-    if (post.can_download !== false) actions.append(...(assets.length ? [zipBtn] : [htmlBtn, zipBtn]));
+    // 添付ファイルがあるときも、1ファイル（埋め込み）とZIP（HTMLと同じ場所にファイルを並べる）の両方を出す
+    if (post.can_download !== false) actions.append(htmlBtn, zipBtn);
     else actions.append(h("span", { class: "badge", title: "投稿者がダウンロードを許可していません" }, "⬇ ダウンロード不可"));
     if (isAuthor) {
       actions.append(h("a", { class: "btn", href: `#/post/${id}/edit` }, "編集"));
@@ -3148,13 +3198,18 @@
         tabs, body,
         assets.length ? h("div", { class: "assets-box" },
           h("h3", {}, `🖼 このHTMLで使う画像・音声（${assets.length}）`),
-          h("p", { class: "muted", style: "margin:.2rem 0 .6rem" }, "企画に登録されたファイルのうち、このHTMLが使うものです。HTMLの中では、ファイル名のまま参照できます（例：", h("code", {}, `<img src="${assets[0].name}">`), "）。"),
+          h("p", { class: "muted", style: "margin:.2rem 0 .6rem" }, "企画に登録されたファイルのうち、このHTMLが使うものです。HTMLの中では、ファイル名のまま参照できます（例：", h("code", {}, `<img src="${assets[0].name}">`), "）。ZIPでダウンロードすると、HTMLと同じ場所にこれらのファイルが入ります。"),
           h("div", { class: "asset-grid" }, ...assets.map(a => h("div", { class: "asset-card" },
             isAudioName(a.name)
               ? h("audio", { controls: true, preload: "none", src: dataUri(a.mime, a.b64) })
               : h("img", { src: dataUri(a.mime, a.b64), alt: a.name, loading: "lazy" }),
             h("div", { class: "asset-name" }, a.name),
-            h("div", { class: "muted" }, fmtSize(a.size) + (a.group ? "・" + a.group : "")))))) : null),
+            h("div", { class: "muted" }, fmtSize(a.size) + (a.group ? "・" + a.group : "")),
+            post.can_download !== false ? (() => {
+              const sv = h("button", { class: "btn small asset-save", type: "button", title: "このファイルを、名前そのままで保存します" }, "⬇ ファイルとして保存");
+              sv.addEventListener("click", () => busy(sv, () => downloadAssetFile(a)));
+              return sv;
+            })() : null)))) : null),
       (post.is_public === false && (isAuthor || isOwner)) ? viewersBox(post) : null);
   }
 
