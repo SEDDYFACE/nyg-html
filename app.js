@@ -2209,11 +2209,11 @@
     showCounts();
     let favBtn;
     if (!session) {
-      favBtn = h("a", { class: "fav-round", href: "#/login", title: "ログインすると、お気に入りに登録できます", "aria-label": "お気に入り登録（ログインが必要です）" }, "☆");
+      favBtn = h("a", { class: "fav-round", href: "#/login", title: "ログインすると、お気に入りに登録できます", "aria-label": "お気に入り登録（ログインが必要です）" }, "お気に入り登録");
     } else {
       favBtn = h("button", { class: "fav-round", type: "button" });
       const paint = () => {
-        favBtn.textContent = isFav ? "★" : "☆";
+        favBtn.textContent = isFav ? "お気に入り登録済み" : "お気に入り登録";
         favBtn.classList.toggle("fav-on", isFav);
         favBtn.setAttribute("aria-pressed", String(isFav));
         favBtn.title = isFav ? "お気に入り登録済み（押すと解除）" : "お気に入りに登録";
