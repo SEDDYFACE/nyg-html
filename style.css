@@ -391,3 +391,15 @@ details.targets > summary.none { color: #8a5a00; }
 .legacy-box h3 { margin: 0 0 .4rem; }
 .legacy-box p { margin: 0 0 .6rem; }
 .legacy-box [hidden] { display: none !important; }
+
+/* お気に入り：企画名の右の丸いボタン */
+.title-row { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
+.title-row h1 { margin: 0; }
+.fav-round { flex: none; width: 40px; height: 40px; border-radius: 50%; border: 1px solid var(--line); background: #fff; color: #8a94a3;
+  font-size: 1.35rem; line-height: 1; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; padding: 0 0 2px; text-decoration: none;
+  transition: background .15s, border-color .15s, color .15s, transform .1s; }
+.fav-round:hover { background: #fff7d6; border-color: #e6c200; color: #b88a00; }
+.fav-round:active { transform: scale(.94); }
+.fav-round.fav-on { background: #ffe680; border-color: #e6c200; color: #8a6200; }
+.fav-round:disabled { opacity: .6; cursor: default; }
+.fav-round:focus-visible { outline: 3px solid #bcd7ff; outline-offset: 2px; }
