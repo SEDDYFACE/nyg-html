@@ -421,3 +421,7 @@ details.targets > summary.none { color: #8a5a00; }
 .verify-alt p[hidden] { display: none; }
 .verify-ask .warn-text { background: #fff4e5; border: 1px solid #ffd59a; border-radius: 8px; padding: .5rem .7rem; }
 .verify-ask p[hidden] { display: none; }
+
+/* 「ダウンロード不可」の表示：ボタンと同じ高さの中で、文字を縦の真ん中にそろえる */
+.actions .badge { display: inline-flex; align-items: center; align-self: center; padding: .3rem .8rem; font-size: .8rem; }
+.code-note { margin: .6rem 0 0; }
