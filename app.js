@@ -1375,16 +1375,25 @@
 
     const search = h("input", { type: "search", class: "search", placeholder: "企画を検索…" });
     const list = h("div", { class: "grid" });
-    // 並べ替え：作成順／更新順／アクセス数順（同数ならお気に入り数→作成順）／お気に入り数順（同数ならアクセス数→作成順）
+    // 流行順の順位（スコアの計算はサーバー側。ここには順位だけが届き、スコアは分からない）。取得できなくても、一覧は出る
+    const trendRank = {};
+    try {
+      const tr = await sb.rpc("project_trend_ranks");
+      if (!tr.error) (tr.data || []).forEach(r => { trendRank[r.project_id] = r.rank; });
+    } catch (e) { /* 流行の情報がなくても、一覧は表示する */ }
+    // 並べ替え：流行順／作成順／更新順／アクセス数順（同数ならお気に入り数→作成順）／お気に入り数順（同数ならアクセス数→作成順）
     const sortSel = h("select", { class: "sort-select", "aria-label": "並べ替え" },
+      h("option", { value: "trend" }, "流行順"),
       h("option", { value: "new" }, "作成順"),
       h("option", { value: "updated" }, "更新順"),
       h("option", { value: "views" }, "アクセス数順"),
       h("option", { value: "favs" }, "お気に入り数順"));
-    sortSel.value = "updated";   // 初期は「更新順」
+    sortSel.value = "trend";   // 初期は「流行順」
     const num = v => v || 0;
     const byNew = (a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0);
     const sorters = {
+      // 流行順：順位の良い順（直近のアクセスがない企画は最後）→ 同じなら お気に入り数 → 作成が新しい順
+      trend: (a, b) => (trendRank[a.id] || Infinity) - (trendRank[b.id] || Infinity) || num(b.favorite_count) - num(a.favorite_count) || byNew(a, b),
       new: byNew,
       updated: (a, b) => (a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0) || byNew(a, b),
       views: (a, b) => num(b.view_count) - num(a.view_count) || num(b.favorite_count) - num(a.favorite_count) || byNew(a, b),
