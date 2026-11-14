@@ -60,8 +60,14 @@
     if (/approval required/i.test(m)) return "500KBを超えるファイルは、管理者の許可が必要です。";
     if (/exceeds approved size/i.test(m)) return "許可されたファイルの大きさ（申請の5％増しまで）を超えています。";
     if (/asset too large/i.test(m)) return "ファイルは1つ3MBまでです。";
-    if (/too many posts for assets/i.test(m)) return "HTMLが4個以上ある企画には、画像・音声を登録できません（ファイルがある企画は、HTMLを3個までです）。";
-    if (/too many posts/i.test(m)) { const n = (m.match(/too many posts:\s*(\d+)/i) || [])[1]; return `この企画のHTMLは、上限${n ? "（" + n + "個）" : ""}に達しています（画像・音声のファイルがある企画は3個まで、ない企画は6個までです）。`; }
+    if (/login required/i.test(m)) return "ログインしている人だけが、この操作をできます。";
+    if (/cloud not enabled/i.test(m)) return "このHTMLには、Cloudが許可されていません。";
+    if (/cloud full/i.test(m)) return "このHTMLのCloudは、記録できる人数（200人）がいっぱいです。";
+    if (/invalid score/i.test(m)) return "Cloudに記録できるのは、数字のスコアだけです。";
+    if (/invalid better/i.test(m)) return "指定が正しくありません。";
+    if (/user not found/i.test(m)) return "そのユーザー名のユーザーが見つかりません。";
+    if (/too many posts for assets/i.test(m)) return "HTMLが3個以上ある企画には、画像・音声を登録できません（ファイルがある企画は、HTMLを2個までです）。";
+    if (/too many posts/i.test(m)) { const n = (m.match(/too many posts:\s*(\d+)/i) || [])[1]; return `この企画のHTMLは、上限${n ? "（" + n + "個）" : ""}に達しています（画像・音声のファイルがある企画は2個まで、ない企画は4個までです）。`; }
     if (/project quota/i.test(m)) return "この企画の画像・音声の容量が上限に達しています。使っていないファイルを削除するか、「容量を広げる」から管理者に許可を要請してください。";
     if (/too many groups/i.test(m)) return "グループは、1企画につき20個までです。";
     if (/duplicate group/i.test(m)) return "同じ名前のグループがすでにあります。";
@@ -840,6 +846,7 @@
   async function route() {
     const token = ++renderToken;
     clearInterval(dmTimer);
+    if (cloudHostOff) cloudHostOff();   // 前のページのプレビューと Cloud をつなぐ窓口を閉じる
     await loadAdminNames();
     { const before = dmUnread; await refreshDmUnread(); if (before !== dmUnread) renderNav(); }
     loadNotifs();   // ベルの更新（待たない）
@@ -866,7 +873,7 @@
       else if (a === "project" && b && c === "new") view = await viewPostNew(b);
       else if (a === "project" && b) view = await viewProject(b);
       else if (a === "post" && b && c === "edit") view = await viewPostEdit(b);
-      else if (a === "post" && b) view = await viewPost(b);
+      else if (a === "post" && b) view = await viewPost(b, token);
       else view = h("div", { class: "card" }, h("h2", {}, "ページが見つかりません"), h("a", { href: "#/" }, "トップへ戻る"));
       if (token !== renderToken) return;
       app.replaceChildren(view);
@@ -1315,10 +1322,12 @@
     search.addEventListener("input", draw);
     nameFilter.addEventListener("change", draw);
     draw();
+    const cloudAdmin = await cloudAdminBox();
 
     return h("section", {},
       h("div", { class: "page-head" }, h("h1", {}, "👤 ユーザー管理"), count),
       legacyAssetsBox(),
+      cloudAdmin,
       h("p", { class: "notice" }, "管理者だけが見られるページです。メールアドレスと本名は他の人には表示されません。取り扱いにご注意ください。",
         h("br"), "本名の確認は2段階です：①本人が入力（または管理者が登録）→ ②管理者が「確認済みにする」。登録から3日たっても本名が未入力のユーザーは、自動的に一時凍結されます（管理者は対象外）。"),
       h("div", { class: "search-row" }, search, nameFilter),
@@ -1729,7 +1738,7 @@
         go("#/");
       });
     });
-    return h("div", {}, form, realNameCard(), emailCard(), passwordCard());
+    return h("div", {}, form, realNameCard(), cloudConnectorCard(), emailCard(), passwordCard());
   }
 
   // 自分の本名（1段階目：本人の入力 → 2段階目：管理者の確認）
@@ -2128,7 +2137,7 @@
         .eq("project_id", id).order("created_at", { ascending: true }),
       // 自分が閲覧を許可されている限定公開の投稿
       session ? sb.from("post_viewers").select("post_id").eq("user_id", session.user.id) : Promise.resolve({ data: [] }),
-      // この企画で投稿できるHTMLの数の上限（ファイルがあれば3個、なければ6個。SQL未更新なら null）
+      // この企画で投稿できるHTMLの数の上限（ファイルがあれば2個、なければ4個。SQL未更新なら null）
       sb.rpc("project_post_limit", { p_project: id }),
       // 自分がお気に入りに登録しているか
       session ? sb.from("project_favorites").select("project_id").eq("project_id", id).eq("user_id", session.user.id).limit(1) : Promise.resolve({ data: [] })
@@ -2161,7 +2170,7 @@
     }
 
     let postAction;
-    if (canPost(project) && postLimit !== null && posts.length >= postLimit) postAction = h("span", { class: "badge lock", title: "画像・音声のファイルがある企画は3個まで、ない企画は6個までです" }, `HTMLの上限（${postLimit}個）に達しています`);
+    if (canPost(project) && postLimit !== null && posts.length >= postLimit) postAction = h("span", { class: "badge lock", title: "画像・音声のファイルがある企画は2個まで、ない企画は4個までです" }, `HTMLの上限（${postLimit}個）に達しています`);
     else if (canPost(project)) postAction = h("a", { class: "btn primary", href: `#/project/${id}/new` }, "＋ コードを投稿");
     else if (!session && project.allow_others_post) postAction = h("a", { class: "btn primary", href: "#/login" }, "ログインして投稿");
 
@@ -2472,7 +2481,7 @@
     upBtn.addEventListener("click", () => busy(upBtn, async () => {
       const used = ctx.getAssets().reduce((n, a) => n + (a.size || 0), 0), adding = picks.reduce((n, x) => n + x.size, 0);
       if (used + adding > ctx.getQuota()) throw new Error(`この企画の容量の上限（${fmtSize(ctx.getQuota())}）を超えます（いま${fmtSize(used)}、今回${fmtSize(adding)}）。ファイルを減らす・削除するか、「容量を広げる」から管理者に許可を要請してください。`);
-      if (ctx.getPostCount() > 3) throw new Error("HTMLが4個以上ある企画には、画像・音声を登録できません（ファイルがある企画は、HTMLを3個までです）。");
+      if (ctx.getPostCount() > 2) throw new Error("HTMLが3個以上ある企画には、画像・音声を登録できません（ファイルがある企画は、HTMLを2個までです）。");
       for (const it of picks) {
         const st = stateOf(it);
         if (st.kind === "bad") throw new Error(`「${it.name}」：${st.text}`);
@@ -2785,9 +2794,9 @@
           h("div", { class: "quota-bar" }, h("div", { class: "quota-fill", style: `width:${pct}%` })),
           quotaControls(quota)),
         h("p", { class: "notice" },
-          `HTMLの数の上限：ファイルがある企画は3個まで、ない企画は6個までです（いま${posts.length}個・上限${limit}個）。`,
-          posts.length > 3 && !assets.length ? h("strong", {}, " いまはHTMLが4個以上あるので、ファイルを登録するには、HTMLを3個以下にしてください。") : null,
-          assets.length && posts.length > 3 ? h("strong", {}, " HTMLが上限を超えているため、新しいHTMLは投稿できません。") : null));
+          `HTMLの数の上限：ファイルがある企画は2個まで、ない企画は4個までです（いま${posts.length}個・上限${limit}個）。`,
+          posts.length > 2 && !assets.length ? h("strong", {}, " いまはHTMLが3個以上あるので、ファイルを登録するには、HTMLを2個以下にしてください。") : null,
+          assets.length && posts.length > 2 ? h("strong", {}, " HTMLが上限を超えているため、新しいHTMLは投稿できません。") : null));
       uploader.refresh();
       listBox.replaceChildren();
       rowBoxes = new Map(); groupBoxes = [];
@@ -3144,8 +3153,250 @@
     const [limRes, cntRes] = await Promise.all([sb.rpc("project_post_limit", { p_project: projectId }), sb.from("posts").select("id").eq("project_id", projectId)]);
     const lim = limRes && typeof limRes.data === "number" ? limRes.data : null;
     if (lim !== null && cntRes.data && cntRes.data.length >= lim)
-      return h("div", { class: "error-box" }, `この企画のHTMLは、上限（${lim}個）に達しています。画像・音声のファイルがある企画は3個まで、ない企画は6個までです。`, h("br"), h("a", { href: `#/project/${projectId}` }, "企画に戻る"));
+      return h("div", { class: "error-box" }, `この企画のHTMLは、上限（${lim}個）に達しています。画像・音声のファイルがある企画は2個まで、ない企画は4個までです。`, h("br"), h("a", { href: `#/project/${projectId}` }, "企画に戻る"));
     return postForm(project, null);
+  }
+
+  // HTMLを開いたとき、読み込みを始める前の待ち時間（サーバーの負荷を減らすため）：
+  // ログインしていない人は4秒、ログインしている人は1秒。待っている間に別のページへ移ったら、読み込みは始めない
+  const OPEN_WAIT_ANON = 4, OPEN_WAIT_USER = 1;
+  async function waitBeforeOpen(token) {
+    const secs = session ? OPEN_WAIT_USER : OPEN_WAIT_ANON;
+    if (token !== renderToken) return false;
+    const left = h("strong", { class: "wait-left" }, String(secs));
+    app.replaceChildren(h("div", { class: "card wait-card" },
+      h("h2", {}, "読み込みを準備しています…"),
+      h("p", {}, "サーバーの負荷を軽くするため、HTMLの読み込みを始めるまで、少しお待ちください。あと ", left, " 秒"),
+      session ? null : h("p", { class: "muted" }, `ログインしている人は、待ち時間が${OPEN_WAIT_USER}秒になります。`, h("a", { href: "#/login" }, "ログイン"))));
+    const end = Date.now() + secs * 1000;
+    for (;;) {
+      const rest = end - Date.now();
+      if (rest <= 0) break;
+      left.textContent = String(Math.ceil(rest / 1000));
+      await new Promise(r => setTimeout(r, Math.min(rest, 200)));
+      if (token !== renderToken) return false;
+    }
+    return token === renderToken;
+  }
+
+  /* ======================================================
+   * Internet Cloud
+   *   プレビューの中のHTML（Cloud コネクタ）からのメッセージを受けて、サーバーの関数を呼ぶ。
+   *   許可されたHTMLかどうか・ログインしている人のユーザー名の記録は、すべてサーバー側で決まる
+   * ==================================================== */
+  let cloudHostOff = null;
+  function attachCloudHost(frame, postId, token) {
+    if (cloudHostOff) cloudHostOff();
+    let times = [];
+    const reply = (src, id, ok, data, error) => { try { src.postMessage({ kh: "cloud-res", id, ok, data, error }, "*"); } catch (e) { /* 閉じられた */ } };
+    const onMsg = async ev => {
+      const d = ev.data;
+      if (!d || d.kh !== "cloud" || ev.source !== frame.contentWindow || token !== renderToken) return;
+      const id = String(d.id == null ? "" : d.id).slice(0, 64);
+      const now = Date.now();
+      times = times.filter(t => now - t < 2000);
+      if (times.length >= 20) return reply(ev.source, id, false, null, "Cloudの呼び出しが多すぎます。少し待ってから、もう一度お試しください。");
+      times.push(now);
+      try {
+        let out;
+        const call = async (name, args) => { const r = await sb.rpc(name, args); if (r.error) throw r.error; return r.data; };
+        if (d.op === "me") out = session && profile ? { username: profile.username } : null;
+        else if (d.op === "info") { const i = await call("cloud_info", { p_post: postId }); out = { used: i.used, limit: i.limit, rows: i.rows, better: i.better }; }
+        else if (d.op === "list") out = await call("cloud_list", { p_post: postId });
+        else if (d.op === "submit") {
+          const sc = Number(d.score);
+          if (typeof d.score !== "number" || !isFinite(sc)) throw new Error("invalid score");
+          // ログインしていない人のスコアは、記録しない（サーバーにも送らない）
+          out = session ? await call("cloud_submit", { p_post: postId, p_score: sc }) : { saved: false, best: null, reason: "login" };
+        }
+        else if (d.op === "remove") { await call("cloud_remove", { p_post: postId }); out = true; }
+        else throw new Error("unknown op");
+        reply(ev.source, id, true, out);
+      } catch (e) { reply(ev.source, id, false, null, friendly(e)); }
+    };
+    window.addEventListener("message", onMsg);
+    cloudHostOff = () => { window.removeEventListener("message", onMsg); cloudHostOff = null; };
+  }
+
+  // 投稿ページの「☁ Cloud」の欄：状態・（管理者への）申請・（管理者の）許可・記録の確認と削除
+  function cloudBox(postId, firstInfo) {
+    const box = h("div", { class: "cloud-box" });
+    let info = firstInfo;
+    const betterText = b => b === "low" ? "小さいほど良い（タイムなど）" : "大きいほど良い（得点など）";
+    async function draw() {
+      const i = info;
+      if (!i) { box.replaceChildren(); return; }
+      if (!i.enabled) {
+        if (isAdmin) {
+          const on = h("button", { class: "btn small", type: "button" }, "☁ このHTMLにCloudを許可する");
+          on.addEventListener("click", () => busy(on, async () => {
+            const { error } = await sb.rpc("admin_set_cloud_post", { p_post: postId, p_on: true });
+            if (error) throw error;
+            toast("Cloudを許可しました"); await reload();
+          }));
+          box.replaceChildren(h("h3", {}, "☁ Cloud"), h("p", { class: "muted" }, "このHTMLには、まだCloudが許可されていません。"), on);
+        } else if (i.requested && i.can_manage) {
+          box.replaceChildren(h("h3", {}, "☁ Cloud"), h("p", { class: "muted" }, "Cloudの利用を申請中です。管理人の許可をお待ちください。"));
+        } else if (i.can_request) {
+          const ask = h("button", { class: "btn small", type: "button" }, "☁ Cloudの利用を申請する");
+          ask.addEventListener("click", () => busy(ask, async () => {
+            const { error } = await sb.rpc("request_cloud", { p_post: postId });
+            if (error) throw error;
+            toast("申請しました。管理人の許可をお待ちください"); await reload();
+          }));
+          box.replaceChildren(h("h3", {}, "☁ Cloud"), h("p", { class: "muted" }, "このHTMLでCloud（ユーザー名つきの自己ベストの記録）を使うには、管理人の許可が必要です。"), ask);
+        } else box.replaceChildren();
+        return;
+      }
+      const parts = [h("h3", {}, "☁ Cloud"),
+        h("p", { class: "muted" }, `このHTMLは、Cloudを使えます。記録できるのは、1人1件・数字のスコア（自己ベスト）だけです。ログインした人だけが記録され、ユーザー名がいっしょに残ります。いま${i.rows}人が記録しています（最大200人）。`),
+        h("p", { class: "muted" }, "スコアの向き：", h("strong", {}, betterText(i.better)))];
+      if (i.can_manage) {
+        parts.push(h("p", { class: "muted" }, i.connector
+          ? h("span", {}, "コネクタ（JavaScript）は、", h("a", { href: "#/account" }, "アカウント設定の「☁ Cloudコネクタ」"), "から受け取れます。")
+          : "コネクタ（JavaScript）の利用は、管理人に許可された人だけです。必要なときは、管理人に連絡してください。"));
+        const flip = h("button", { class: "btn small", type: "button", "data-better": i.better === "low" ? "high" : "low" },
+          i.better === "low" ? "「大きいほど良い」に変える" : "「小さいほど良い」に変える");
+        flip.addEventListener("click", () => busy(flip, async () => {
+          const { error } = await sb.rpc("cloud_set_better", { p_post: postId, p_better: i.better === "low" ? "high" : "low" });
+          if (error) throw error;
+          toast("スコアの向きを変えました（これまでの記録は、そのまま残ります）"); await reload();
+        }));
+        parts.push(h("div", { class: "actions" }, flip));
+        let list = [];
+        try { const r = await sb.rpc("cloud_list", { p_post: postId }); if (!r.error) list = r.data || []; } catch (e) { /* 表示だけ */ }
+        const clearAll = h("button", { class: "btn small danger", type: "button" }, "記録をすべて消す");
+        clearAll.addEventListener("click", () => {
+          if (!confirm("このHTMLのCloudの記録を、すべて消します。元に戻せません。よろしいですか？")) return;
+          busy(clearAll, async () => {
+            const { error } = await sb.rpc("cloud_clear", { p_post: postId });
+            if (error) throw error;
+            toast("記録を消しました"); await reload();
+          });
+        });
+        const tbody = h("tbody", {});
+        if (!list.length) tbody.append(h("tr", {}, h("td", { colspan: 3, class: "muted" }, "記録はまだありません。")));
+        list.forEach(r => {
+          const del = h("button", { class: "btn small", type: "button", title: "この人の記録を、すべて消します" }, "この人の分を消す");
+          del.addEventListener("click", () => {
+            if (!confirm(`@${r.username} の記録を、このHTMLからすべて消します。よろしいですか？`)) return;
+            busy(del, async () => {
+              const { error } = await sb.rpc("cloud_clear", { p_post: postId, p_username: r.username });
+              if (error) throw error;
+              toast("消しました"); await reload();
+            });
+          });
+          tbody.append(h("tr", {}, h("td", {}, "@" + r.username), h("td", { class: "cloud-val" }, String(r.score)), h("td", {}, del)));
+        });
+        parts.push(h("div", { class: "table-wrap" }, h("table", { class: "table cloud-table" },
+          h("thead", {}, h("tr", {}, h("th", {}, "ユーザー"), h("th", {}, "スコア（良い順）"), h("th", {}, ""))), tbody)),
+          h("div", { class: "actions" }, clearAll));
+      }
+      if (isAdmin) {
+        const off = h("button", { class: "btn small", type: "button" }, "Cloudの許可を取り消す");
+        off.addEventListener("click", () => {
+          if (!confirm("このHTMLのCloudの許可を取り消します（記録は残り、再び許可すると使えます）。よろしいですか？")) return;
+          busy(off, async () => {
+            const { error } = await sb.rpc("admin_set_cloud_post", { p_post: postId, p_on: false });
+            if (error) throw error;
+            toast("許可を取り消しました"); await reload();
+          });
+        });
+        parts.push(h("div", { class: "actions" }, off));
+      }
+      box.replaceChildren(...parts);
+    }
+    async function reload() {
+      const r = await sb.rpc("cloud_info", { p_post: postId });
+      if (!r.error && r.data) info = r.data;
+      await draw();
+    }
+    draw();
+    return box;
+  }
+
+  // アカウント設定：Cloud コネクタ（管理人に許可された人だけに、サーバーから渡す）
+  function cloudConnectorCard() {
+    const slot = h("div", {});
+    (async () => {
+      if (!session) return;
+      try { const r = await sb.rpc("cloud_connector_ok"); if (r.error || r.data !== true) return; } catch (e) { return; }
+      const getSrc = async () => { const { data, error } = await sb.rpc("get_cloud_connector"); if (error) throw error; return data; };
+      const copy = h("button", { class: "btn", type: "button" }, "コネクタをコピー");
+      copy.addEventListener("click", () => busy(copy, async () => {
+        const text = await getSrc();
+        try { await navigator.clipboard.writeText(text); }
+        catch (e) {
+          const ta = h("textarea", { style: "position:fixed;opacity:0" }, text);
+          document.body.append(ta); ta.select(); document.execCommand("copy"); ta.remove();
+        }
+        toast("コネクタをコピーしました。HTMLの <script> の中に貼ってください");
+      }));
+      const dl = h("button", { class: "btn", type: "button" }, "⬇ cloud.js をダウンロード");
+      dl.addEventListener("click", () => busy(dl, async () => { download("cloud.js", new Blob([await getSrc()], { type: "text/javascript" })); }));
+      slot.replaceChildren(h("div", { class: "card form cloud-conn" },
+        h("h2", {}, "☁ Cloudコネクタ"),
+        h("p", { class: "muted" }, "管理人に許可された人だけが受け取れる、JavaScriptです。Cloudを許可されたHTML（投稿）に貼ると、ユーザー名つきで、スコアの自己ベストを記録・読み取りできます（1人1件・数字のスコアだけ。ログインしていない人のスコアは記録されません）。",
+          "コードひろばのプレビューの中でだけ動きます（ダウンロードして単体で開くと、動きません）。このコネクタを、許可されていない人に渡さないでください。"),
+        h("pre", { class: "codeview" }, `// 使い方の例（コネクタを貼ったあと）
+const me = await Cloud.me();                 // { username } / ログインしていなければ null
+const r = await Cloud.submit(120);           // 自己ベストなら記録 → { saved, best, reason }
+const mine = await Cloud.mine();             // 自分の自己ベスト（なければ null）
+const top = await Cloud.ranking();           // みんなの記録（良い順）[{ rank, username, score, updated_at }]
+await Cloud.remove();                        // 自分の記録を消す`),
+        h("div", { class: "actions" }, copy, dl)));
+    })();
+    return slot;
+  }
+
+  // 管理者ページ：Cloud の許可（ユーザー・申請・許可済みの投稿）
+  async function cloudAdminBox() {
+    let ov;
+    try { const r = await sb.rpc("admin_cloud_overview"); if (r.error || !r.data) return null; ov = r.data; } catch (e) { return null; }   // SQL未実行なら出さない
+    const box = h("div", { class: "card cloud-admin" });
+    async function reload() {
+      const r = await sb.rpc("admin_cloud_overview");
+      if (r.error) throw r.error;
+      ov = r.data; draw();
+    }
+    const act = (btn, fn, msg) => btn.addEventListener("click", () => busy(btn, async () => { await fn(); toast(msg); await reload(); }));
+    function draw() {
+      const nameIn = h("input", { type: "text", class: "search", placeholder: "コネクタを許可するユーザー名", maxlength: 20, autocomplete: "off" });
+      const add = h("button", { class: "btn small primary", type: "button" }, "許可する");
+      add.addEventListener("click", () => busy(add, async () => {
+        const nm = nameIn.value.trim().replace(/^@/, "");
+        if (!nm) throw new Error("ユーザー名を入力してください。");
+        const { error } = await sb.rpc("admin_set_cloud_user", { p_username: nm, p_on: true });
+        if (error) throw error;
+        toast(`@${nm} にコネクタを許可しました`); await reload();
+      }));
+      const users = ov.users.length ? ov.users.map(u => {
+        const rm = h("button", { class: "btn small", type: "button", "data-user": u.username }, "取り消す");
+        act(rm, async () => { const { error } = await sb.rpc("admin_set_cloud_user", { p_username: u.username, p_on: false }); if (error) throw error; }, `@${u.username} の許可を取り消しました`);
+        return h("li", {}, h("strong", {}, "@" + u.username), " ", rm);
+      }) : [h("li", { class: "muted" }, "まだいません。")];
+      const reqs = ov.requests.length ? ov.requests.map(r => {
+        const ok = h("button", { class: "btn small primary", type: "button", "data-ok": r.post_id }, "許可");
+        const no = h("button", { class: "btn small", type: "button", "data-no": r.post_id }, "却下");
+        act(ok, async () => { const { error } = await sb.rpc("admin_resolve_cloud_request", { p_post: r.post_id, p_ok: true }); if (error) throw error; }, "Cloudを許可しました");
+        act(no, async () => { const { error } = await sb.rpc("admin_resolve_cloud_request", { p_post: r.post_id, p_ok: false }); if (error) throw error; }, "却下しました");
+        return h("li", {}, "@" + r.username, " →「", h("a", { href: `#/post/${r.post_id}` }, r.title), "」（企画：", r.project_title, "） ", ok, " ", no);
+      }) : [h("li", { class: "muted" }, "申請はありません。")];
+      const posts = ov.posts.length ? ov.posts.map(p => {
+        const off = h("button", { class: "btn small", type: "button", "data-off": p.post_id }, "許可を取り消す");
+        act(off, async () => { const { error } = await sb.rpc("admin_set_cloud_post", { p_post: p.post_id, p_on: false }); if (error) throw error; }, "許可を取り消しました");
+        return h("li", {}, h("a", { href: `#/post/${p.post_id}` }, p.title), `（企画：${p.project_title}）　${p.rows}人が記録・${p.better === "low" ? "小さいほど良い" : "大きいほど良い"} `, off);
+      }) : [h("li", { class: "muted" }, "まだありません。")];
+      box.replaceChildren(
+        h("h2", {}, "☁ Internet Cloud"),
+        h("p", { class: "muted" }, "Cloudを使えるのは、管理者が許可したHTML（投稿）だけです。Cloudに記録できるのは、1つのHTMLにつき、1人1件の数字のスコア（自己ベスト）だけです。コネクタ（JavaScript）は、ここで許可したユーザーだけが、アカウント設定から受け取れます。HTMLの許可は、申請を許可するか、各投稿のページから行えます。"),
+        h("h3", {}, "コネクタを受け取れるユーザー"), h("ul", { class: "cloud-list" }, ...users),
+        h("div", { class: "search-row" }, nameIn, add),
+        h("h3", {}, `Cloudの利用の申請（${ov.requests.length}）`), h("ul", { class: "cloud-list" }, ...reqs),
+        h("h3", {}, `Cloudを許可しているHTML（${ov.posts.length}）`), h("ul", { class: "cloud-list" }, ...posts));
+    }
+    draw();
+    return box;
   }
 
   // 投稿の取得。コード（html / css / js / memo）は、閲覧権限がないと空で返ってくる（can_view = false）
@@ -3204,7 +3455,8 @@
     return box;
   }
 
-  async function viewPost(id) {
+  async function viewPost(id, token) {
+    if (token !== undefined && !(await waitBeforeOpen(token))) return h("div", {});   // 待っている間に別のページへ移った（描画されない）
     const post = await fetchPost(id);
     if (!post) return notFound();
     const isAuthor = !!session && (post.author_id === session.user.id || isAdmin);   // 管理者は編集も可
@@ -3236,6 +3488,10 @@
             h("p", { class: "muted" }, "プレビュー・コードの閲覧・ダウンロードは、作成者に許可された人だけができます。「公開を要請」を押すと、あなたのユーザー名が作成者に通知されます。"),
             req)));
     }
+
+    // Cloud の状態（SQL 未実行などで取れないときは、Cloud の欄を出さない）
+    let cloudInfo = null;
+    try { const r = await sb.rpc("cloud_info", { p_post: id }); if (!r.error && r.data) cloudInfo = r.data; } catch (e) { /* 出さない */ }
 
     // 添付ファイル（画像・音声）
     const { data: assetData } = await sb.rpc("get_post_assets", { p_post: id });
@@ -3299,8 +3555,10 @@
     }
 
     // タブ（プレビュー / HTML / CSS / JS）
+    const previewEl = previewWithFullscreen(previewDoc(post, assets));
+    if (cloudInfo) attachCloudHost(previewEl.querySelector("iframe"), id, token);   // Cloud コネクタからの呼び出しを受ける（許可されていなければ、サーバーが断る）
     const panels = {
-      preview: previewWithFullscreen(previewDoc(post, assets)),
+      preview: previewEl,
       html: h("pre", { class: "codeview" }, post.html || "（なし）"),
       css: h("pre", { class: "codeview" }, post.css || "（なし）"),
       js: h("pre", { class: "codeview" }, post.js || "（なし）")
@@ -3334,6 +3592,7 @@
           h("p", {}, post.memo)) : null,
         h("p", { class: "notice" }, "投稿者が書いたコードです。プレビューは隔離された領域で実行されています。ダウンロードしたコードは、内容を確認してから実行してください。"),
         codeOk ? tabs : null, body, codeNote,
+        cloudInfo ? cloudBox(id, cloudInfo) : null,
         assets.length ? h("div", { class: "assets-box" },
           h("h3", {}, `🖼 このHTMLで使う画像・音声（${assets.length}）`),
           h("p", { class: "muted", style: "margin:.2rem 0 .6rem" }, "企画に登録されたファイルのうち、このHTMLが使うものです。HTMLの中では、ファイル名のまま参照できます（例：", h("code", {}, `<img src="${assets[0].name}">`), "）。ZIPでダウンロードすると、HTMLと同じ場所にこれらのファイルが入ります。"),
