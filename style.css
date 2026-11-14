@@ -426,10 +426,6 @@ details.targets > summary.none { color: #8a5a00; }
 .actions .badge { display: inline-flex; align-items: center; align-self: center; padding: .3rem .8rem; font-size: .8rem; }
 .code-note { margin: .6rem 0 0; }
 
-/* ---- HTMLを開く前の待ち時間 ---- */
-.wait-card { text-align: center; padding: 2rem 1rem; }
-.wait-card .wait-left { font-size: 1.4em; }
-
 /* ---- Internet Cloud ---- */
 .cloud-box { margin-top: 1rem; padding: .8rem 1rem; border: 1px solid var(--border, #d8dee9); border-radius: 10px; background: rgba(120, 150, 220, .06); }
 .cloud-box h3, .cloud-admin h3 { margin: .2rem 0 .4rem; }
