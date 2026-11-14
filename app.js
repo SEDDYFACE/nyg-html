@@ -1393,7 +1393,7 @@
     const byNew = (a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0);
     const sorters = {
       // 流行順：順位の良い順（直近のアクセスがない企画は最後）→ 同じなら お気に入り数 → 作成が新しい順
-      trend: (a, b) => (trendRank[a.id] || Infinity) - (trendRank[b.id] || Infinity) || num(b.favorite_count) - num(a.favorite_count) || byNew(a, b),
+      trend: (a, b) => (trendRank[a.id] || Infinity) - (trendRank[b.id] || Infinity) || num(b.view_count) - num(a.view_count) || num(b.favorite_count) - num(a.favorite_count) || byNew(a, b),
       new: byNew,
       updated: (a, b) => (a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0) || byNew(a, b),
       views: (a, b) => num(b.view_count) - num(a.view_count) || num(b.favorite_count) - num(a.favorite_count) || byNew(a, b),
