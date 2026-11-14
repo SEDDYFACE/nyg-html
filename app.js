@@ -517,9 +517,16 @@
   // 管理者向け：メール認証の要請（認証済みにする）
   function verifyItem(n) {
     const who = n.actor ? n.actor.username : "?";
+    const nameLine = h("div", { class: "ex" }, "本名：確認中…");
     const box = h("div", { class: "bell-item req" + (n.read_at ? "" : " unread") },
       h("div", { class: "t" }, notifText(n)),
+      nameLine,
       h("div", { class: "d" }, fmtDate(n.created_at)));
+    sb.rpc("admin_get_real_name", { p_user: n.actor_id }).then(({ data, error }) => {
+      if (error || !data) { nameLine.textContent = "本名：取得できませんでした"; return; }
+      nameLine.textContent = data.status === "none" ? "本名：未入力"
+        : `本名：${data.real_name}（${data.status === "confirmed" ? "管理者が確認済み" : "未確認"}）`;
+    });
     const ok = h("button", { class: "btn small primary", type: "button" }, `@${who} を認証済みにする`);
     ok.addEventListener("click", () => {
       if (!confirm(`@${who} を、メール認証済みにします（ログインできるようになります）。よろしいですか？`)) return;
@@ -925,6 +932,33 @@
       ...parts);
   }
 
+  // 管理者に認証を要請する（未ログインでも使える）。本名の入力が必要
+  function verifyAskBox(username) {
+    const name = h("input", { type: "text", maxlength: 50, autocomplete: "off", placeholder: "例）山田 太郎", "aria-label": "本名" });
+    const ask = h("button", { class: "btn primary", type: "button" }, "管理者に認証を要請する");
+    const done = h("p", { class: "muted", hidden: true, style: "margin:.5rem 0 0" },
+      "要請しました。管理者が認証すると、ログインできるようになります。認証されたかどうかは、ログイン画面で試してみてください。");
+    ask.addEventListener("click", async () => {
+      let ok = false;
+      await busy(ask, async () => {
+        const nm = name.value.trim();
+        if (!nm) { name.focus(); throw new Error("本名を入力してください。"); }
+        const { error } = await sb.rpc("request_email_verify", { p_username: username, p_name: nm });
+        if (error) throw error;
+        ok = true;
+        ask.textContent = "要請しました";
+        name.disabled = true;
+        done.hidden = false;
+        toast("管理者に認証を要請しました。認証されるまでお待ちください");
+      });
+      if (ok) ask.disabled = true;   // busy が押せる状態に戻すので、要請できたら、改めて押せなくする
+    });
+    return h("div", { class: "verify-ask" },
+      field("本名（必須）", name, "入力された名前は、管理者にしか見えません（他のユーザーには表示されません）。"),
+      h("p", { class: "notice warn-text", style: "margin:.4rem 0 .6rem" }, h("strong", {}, "名前が正しく入力されていない場合、申請は却下される可能性が高いです。")),
+      h("div", { class: "actions" }, ask), done);
+  }
+
   function viewLogin() {
     if (session) { setTimeout(() => go("#/"), 0); return h("div"); }
     const u = h("input", { type: "text", autocomplete: "username", required: true, maxlength: 20 });
@@ -947,14 +981,6 @@
         if (error && /Email not confirmed/i.test(error.message)) {
           // メール未認証：認証メールの再送／管理者への認証の要請
           const username = u.value.trim();
-          const ask = h("button", { class: "btn primary", type: "button" }, "管理者に認証を要請する");
-          ask.addEventListener("click", () => busy(ask, async () => {
-            const { error: e3 } = await sb.rpc("request_email_verify", { p_username: username });
-            if (e3) throw e3;
-            ask.disabled = true;
-            ask.textContent = "要請しました";
-            toast("管理者に認証を要請しました。認証されるまでお待ちください");
-          }));
           const resend = h("button", { class: "btn", type: "button" }, "確認メールを再送する");
           resend.addEventListener("click", () => busy(resend, async () => {
             const { error: e4 } = await sb.auth.resend({ type: "signup", email, options: { emailRedirectTo: BASE_URL } });
@@ -963,8 +989,12 @@
           }));
           notConfirmed.replaceChildren(h("div", { class: "notice" },
             h("strong", {}, "メールアドレスの認証が済んでいません。"),
-            h("br"), "届いたメールのリンクを開いてください。メールが届かないときは、管理者に認証を要請できます。",
-            h("div", { class: "actions", style: "margin-top:.6rem" }, ask, resend)));
+            h("br"), "届いたメールのリンクを開いてください。",
+            h("div", { class: "actions", style: "margin-top:.6rem" }, resend),
+            h("div", { class: "verify-alt" },
+              h("strong", {}, "メールアドレスで認証できない方は以下："),
+              h("p", { class: "muted", style: "margin:.3rem 0 .6rem" }, "メールが届かない・メールを受け取れない場合は、本名を入力して、管理者に認証を要請できます。"),
+              verifyAskBox(username))));
           return;
         }
         if (error) throw error;
@@ -1039,6 +1069,10 @@
               h("li", {}, "届かないときは、迷惑メールフォルダを確認してください"),
               h("li", {}, "メールアドレスを間違えたときは、もう一度新規登録からやり直してください")),
             h("div", { class: "actions" }, resend),
+            h("div", { class: "verify-alt" },
+              h("strong", {}, "メールアドレスで認証できない方は以下："),
+              h("p", { class: "muted", style: "margin:.3rem 0 .6rem" }, "メールが届かない・メールを受け取れない場合は、本名を入力して、管理者に認証を要請できます（管理者が確認したあと、ログインできるようになります）。"),
+              verifyAskBox(username)),
             h("p", { class: "links" }, "リンクを開いたあとは ", h("a", { href: "#/login" }, "ログイン画面へ"))));
         }
       });
@@ -1347,6 +1381,7 @@
       h("option", { value: "updated" }, "更新順"),
       h("option", { value: "views" }, "アクセス数順"),
       h("option", { value: "favs" }, "お気に入り数順"));
+    sortSel.value = "updated";   // 初期は「更新順」
     const num = v => v || 0;
     const byNew = (a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0);
     const sorters = {
