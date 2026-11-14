@@ -3162,17 +3162,13 @@
   const OPEN_WAIT_ANON = 4, OPEN_WAIT_USER = 1;
   async function waitBeforeOpen(token) {
     const secs = session ? OPEN_WAIT_USER : OPEN_WAIT_ANON;
+    // 待っている間は、中身が空っぽの（白い）ページにして、静かに待つ
     if (token !== renderToken) return false;
-    const left = h("strong", { class: "wait-left" }, String(secs));
-    app.replaceChildren(h("div", { class: "card wait-card" },
-      h("h2", {}, "読み込みを準備しています…"),
-      h("p", {}, "サーバーの負荷を軽くするため、HTMLの読み込みを始めるまで、少しお待ちください。あと ", left, " 秒"),
-      session ? null : h("p", { class: "muted" }, `ログインしている人は、待ち時間が${OPEN_WAIT_USER}秒になります。`, h("a", { href: "#/login" }, "ログイン"))));
+    app.replaceChildren();
     const end = Date.now() + secs * 1000;
     for (;;) {
       const rest = end - Date.now();
       if (rest <= 0) break;
-      left.textContent = String(Math.ceil(rest / 1000));
       await new Promise(r => setTimeout(r, Math.min(rest, 200)));
       if (token !== renderToken) return false;
     }
