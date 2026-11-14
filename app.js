@@ -1835,7 +1835,7 @@
     const allow = h("input", { type: "checkbox", checked: project ? project.allow_others_post : false });
     const allowRow = h("label", { class: "check" }, allow,
       h("span", {}, "他の人もこの企画に投稿できるようにする",
-        h("small", { class: "hint" }, "オフの場合、投稿できるのは企画主だけです。どちらの場合も、投稿されたコードは誰でもダウンロードできます。後から変更できます。")));
+        h("small", { class: "hint" }, "オフの場合、投稿できるのは企画主だけです。どちらの場合も、投稿されたコードは、ログインした人ならダウンロード・閲覧できます（投稿ごとに、ダウンロードを許可しない設定もできます）。後から変更できます。")));
     return { title, desc, allow, nodes: [field("企画名", title), field("説明（任意）", desc, "500文字まで"), allowRow] };
   }
 
@@ -2142,8 +2142,14 @@
     // 画面の出し分け用（実際にコードが渡されるかどうかは、データベース側が判定する）
     const canSee = p => p.is_public !== false || (!!session && (p.author_id === session.user.id || canSeeLimited || myViewable.has(p.id)));
 
-    const zipBtn = h("button", { class: "btn", type: "button" }, "⬇ 企画まるごとZIP");
-    zipBtn.addEventListener("click", () => busy(zipBtn, () => downloadProjectZip(project, posts.length)));
+    // ダウンロードはログインした人だけ（ログインしていない人には、ログインへのリンクを出す）
+    let zipBtn;
+    if (session) {
+      zipBtn = h("button", { class: "btn", type: "button" }, "⬇ 企画まるごとZIP");
+      zipBtn.addEventListener("click", () => busy(zipBtn, () => downloadProjectZip(project, posts.length)));
+    } else {
+      zipBtn = h("a", { class: "btn", href: "#/login", title: "ログインすると、ダウンロードできます" }, "ログインしてダウンロード");
+    }
 
     let postAction;
     if (canPost(project) && postLimit !== null && posts.length >= postLimit) postAction = h("span", { class: "badge lock", title: "画像・音声のファイルがある企画は3個まで、ない企画は6個までです" }, `HTMLの上限（${postLimit}個）に達しています`);
@@ -2200,6 +2206,9 @@
         const dlOk = p.is_public === false || p.allow_download !== false || (!!session && (p.author_id === session.user.id || isOwner || !!project.myCollab));
         if (visible && !dlOk) {
           dlBtn = h("span", { class: "badge", title: "投稿者がダウンロードを許可していません" }, "⬇ ダウンロード不可");
+        } else if (visible && !session) {
+          // ダウンロードはログインした人だけ
+          dlBtn = h("a", { class: "btn small", href: "#/login", title: "ログインすると、ダウンロードできます" }, "ログインしてダウンロード");
         } else if (visible && hasAssets.has(p.id)) {
           // 添付ファイルがある投稿は、ZIPだけ
           dlBtn = h("button", { class: "btn small", type: "button" }, "⬇ ZIPでダウンロード");
@@ -2897,7 +2906,7 @@
     const allowDl = h("input", { type: "checkbox", checked: editing ? post.allow_download !== false : true });
     const dlRow = h("label", { class: "check" }, allowDl,
       h("span", {}, "ダウンロードを許可する",
-        h("small", { class: "hint" }, "オフにすると、他の人にはダウンロードボタンが出ません（プレビューとコードの閲覧はできます）。作成者・企画主・共同編集者・管理者は、この設定にかかわらずダウンロードできます。投稿したあとも変更できます。")));
+        h("small", { class: "hint" }, "オフにすると、他の人にはダウンロードボタンが出ず、コード（HTML・CSS・JavaScript）も表示されません（プレビューだけ見られます）。作成者・企画主・共同編集者・管理者は、この設定にかかわらずダウンロードできます。投稿したあとも変更できます。")));
     const viewers = new Map();       // いま選ばれている閲覧者（user_id → ユーザー名）
     const origViewers = new Map();   // 保存済みの閲覧者
     const viewerList = h("div", {});
@@ -3044,7 +3053,7 @@
       h("h1", {}, editing ? "投稿を編集" : "コードを投稿"),
       h("p", { class: "muted" }, "企画：" + project.title),
       h("p", { class: "notice" },
-        "投稿できるのは HTML / CSS / JavaScript のコードだけです。投稿したコードは誰でも閲覧・ダウンロードできます。",
+        "投稿できるのは HTML / CSS / JavaScript のコードだけです。投稿したコードは、ログインした人なら閲覧・ダウンロードできます（ダウンロードを許可しない設定にすると、コードは表示されず、プレビューだけ見られます）。",
         h("br"),
         isAdmin ? "管理者は、各最大2MBまで投稿できます。"
           : bigQuota > 0 ? `各500KBまで。大容量投稿（各最大2MB）の残り回数：${bigQuota}回`
@@ -3233,8 +3242,13 @@
 
     const actions = h("div", { class: "actions" });
     // 添付ファイルがあるときも、1ファイル（埋め込み）とZIP（HTMLと同じ場所にファイルを並べる）の両方を出す
-    if (post.can_download !== false) actions.append(htmlBtn, zipBtn);
+    // ダウンロードはログインした人だけ。許可されていない投稿（投稿者がオフにしている）には、「ダウンロード不可」を出す
+    const dlByPolicy = post.is_public === false || post.allow_download !== false || (!!session && post.can_download !== false);
+    if (!session && dlByPolicy) actions.append(h("a", { class: "btn", href: "#/login", title: "ログインすると、ダウンロードできます" }, "ログインしてダウンロード"));
+    else if (session && post.can_download !== false) actions.append(htmlBtn, zipBtn);
     else actions.append(h("span", { class: "badge", title: "投稿者がダウンロードを許可していません" }, "⬇ ダウンロード不可"));
+    // コード（HTML / CSS / JavaScript）の閲覧も、ログインした人で、ダウンロードできる投稿だけ
+    const codeOk = !!session && post.can_download !== false;
     if (isAuthor) {
       actions.append(h("a", { class: "btn", href: `#/post/${id}/edit` }, "編集"));
       // 公開設定のワンタッチ切り替え（閲覧者の追加は「編集」から）
@@ -3282,7 +3296,7 @@
       css: h("pre", { class: "codeview" }, post.css || "（なし）"),
       js: h("pre", { class: "codeview" }, post.js || "（なし）")
     };
-    const labels = { preview: "プレビュー", html: "HTML", css: "CSS", js: "JavaScript" };
+    const labels = codeOk ? { preview: "プレビュー", html: "HTML", css: "CSS", js: "JavaScript" } : { preview: "プレビュー" };
     const tabs = h("div", { class: "tabs" });
     const body = h("div", {});
     function show(key) {
@@ -3295,6 +3309,8 @@
       tabs.append(t);
     });
     show("preview");
+    const codeNote = codeOk ? null : h("p", { class: "muted code-note" },
+      !session && dlByPolicy ? "🔒 コードの閲覧とダウンロードは、ログインした人だけができます。" : "🔒 投稿者がダウンロードを許可していないため、コードは表示されません（プレビューだけ見られます）。");
 
     return h("section", {},
       h("p", {}, h("a", { href: `#/project/${post.project.id}` }, "← " + post.project.title)),
@@ -3308,7 +3324,7 @@
           h("h3", {}, "📝 投稿者のメモ"),
           h("p", {}, post.memo)) : null,
         h("p", { class: "notice" }, "投稿者が書いたコードです。プレビューは隔離された領域で実行されています。ダウンロードしたコードは、内容を確認してから実行してください。"),
-        tabs, body,
+        codeOk ? tabs : null, body, codeNote,
         assets.length ? h("div", { class: "assets-box" },
           h("h3", {}, `🖼 このHTMLで使う画像・音声（${assets.length}）`),
           h("p", { class: "muted", style: "margin:.2rem 0 .6rem" }, "企画に登録されたファイルのうち、このHTMLが使うものです。HTMLの中では、ファイル名のまま参照できます（例：", h("code", {}, `<img src="${assets[0].name}">`), "）。ZIPでダウンロードすると、HTMLと同じ場所にこれらのファイルが入ります。"),
@@ -3318,7 +3334,7 @@
               : h("img", { src: dataUri(a.mime, a.b64), alt: a.name, loading: "lazy" }),
             h("div", { class: "asset-name" }, a.name),
             h("div", { class: "muted" }, fmtSize(a.size) + (a.group ? "・" + a.group : "")),
-            post.can_download !== false ? (() => {
+            session && post.can_download !== false ? (() => {
               const sv = h("button", { class: "btn small asset-save", type: "button", title: "このファイルを、名前そのままで保存します" }, "⬇ ファイルとして保存");
               sv.addEventListener("click", () => busy(sv, () => downloadAssetFile(a)));
               return sv;
