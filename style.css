@@ -442,6 +442,7 @@ details.targets > summary.none { color: #8a5a00; }
 .kh-modal h2 { margin: 0 0 .6rem; font-size: 1.15rem; }
 .kh-modal .actions { margin-top: 1rem; display: flex; gap: .5rem; justify-content: flex-end; }
 
-/* ---- Cloudコネクタ：ボタンと「使い方の例」のあいだをあける ---- */
-.cloud-conn .actions { margin-bottom: 1.4rem; }
-.cloud-conn h3 { margin: 0 0 .5rem; }
+/* ---- Cloud の使い方（折りたたみ） ---- */
+.cloud-usage { margin-top: .6rem; }
+.cloud-usage summary { cursor: pointer; font-weight: 600; }
+.cloud-usage pre.codeview { white-space: pre-wrap; }
