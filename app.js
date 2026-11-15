@@ -688,11 +688,69 @@
   // 見る権限は、Storage 側にも同じ決まりがあるので、見てはいけない人は取り出せない。
   const ASSET_BUCKET = "project-assets";
   const assetB64Cache = new Map();   // path -> base64（同じ画面の間は、取り出し直さない。ファイルは上書きされない）
+  // 一度取り出した画像・音声は、ブラウザ（IndexedDB）にも覚えさせて、次に開いたときの通信を減らす。
+  //  ・path にはファイルごとの番号が入っていて、同じ path のファイルが書き換わることはない（なので、古くなることがない）
+  //  ・path は、見る権限のある人にだけ、サーバーが教える。覚えさせた中身を取り出せるのは、その path を知っている人だけ
+  //  ・覚えさせる量は、合計約50MBまで。超えたら、使われていない古いものから消す。使えない環境では、覚えさせずに動く
+  const ASSET_IDB_MAX = 50 * 1024 * 1024;
+  let assetDbP = null;
+  function assetDb() {
+    if (!assetDbP) {
+      assetDbP = new Promise(resolve => {
+        try {
+          const r = indexedDB.open("kh-assets", 1);
+          r.onupgradeneeded = () => { r.result.createObjectStore("files", { keyPath: "path" }); r.result.createObjectStore("meta", { keyPath: "path" }); };
+          r.onsuccess = () => resolve(r.result);
+          r.onerror = () => resolve(null);
+          r.onblocked = () => resolve(null);
+        } catch (e) { resolve(null); }
+      });
+    }
+    return assetDbP;
+  }
+  const idbReq = r => new Promise(res => { r.onsuccess = () => res(r.result); r.onerror = () => res(undefined); });
+  async function idbGetAsset(path) {
+    try {
+      const db = await assetDb(); if (!db) return null;
+      const tx = db.transaction(["files", "meta"], "readwrite");
+      const f = await idbReq(tx.objectStore("files").get(path));
+      if (!f || typeof f.b64 !== "string") return null;
+      const m = await idbReq(tx.objectStore("meta").get(path));
+      if (m && Date.now() - m.used > 3600 * 1000) tx.objectStore("meta").put({ ...m, used: Date.now() });   // 使った時刻を更新（1時間に1回まで）
+      return f.b64;
+    } catch (e) { return null; }
+  }
+  async function idbPutAsset(path, b64) {
+    try {
+      const db = await assetDb(); if (!db) return;
+      await new Promise(res => {
+        const tx = db.transaction(["files", "meta"], "readwrite");
+        tx.objectStore("files").put({ path, b64 });
+        tx.objectStore("meta").put({ path, size: b64.length, used: Date.now() });
+        tx.oncomplete = () => res(); tx.onerror = () => res(); tx.onabort = () => res();
+      });
+      // 合計が上限を超えたら、使われていない古いものから消す
+      const metas = (await idbReq(db.transaction("meta").objectStore("meta").getAll())) || [];
+      let total = metas.reduce((n, m) => n + (m.size || 0), 0);
+      if (total <= ASSET_IDB_MAX) return;
+      metas.sort((a, b) => a.used - b.used);
+      const tx = db.transaction(["files", "meta"], "readwrite");
+      for (const m of metas) {
+        if (total <= ASSET_IDB_MAX || m.path === path) break;
+        tx.objectStore("files").delete(m.path); tx.objectStore("meta").delete(m.path);
+        total -= m.size || 0;
+      }
+    } catch (e) { /* 覚えさせられなくても、動作には影響しない */ }
+  }
   async function fetchAssetB64(path) {
     if (assetB64Cache.has(path)) return assetB64Cache.get(path);
-    const { data, error } = await sb.storage.from(ASSET_BUCKET).download(path);
-    if (error) throw error;
-    const b64 = await fileToB64(data);
+    let b64 = await idbGetAsset(path);
+    if (b64 == null) {
+      const { data, error } = await sb.storage.from(ASSET_BUCKET).download(path);
+      if (error) throw error;
+      b64 = await fileToB64(data);
+      idbPutAsset(path, b64);   // 覚えさせる（待たない）
+    }
     assetB64Cache.set(path, b64);
     return b64;
   }
@@ -1324,11 +1382,13 @@
     nameFilter.addEventListener("change", draw);
     draw();
     const cloudAdmin = await cloudAdminBox();
+    const ipBox = ipCheckBox();
 
     return h("section", {},
       h("div", { class: "page-head" }, h("h1", {}, "👤 ユーザー管理"), count),
       legacyAssetsBox(),
       cloudAdmin,
+      ipBox,
       h("p", { class: "notice" }, "管理者だけが見られるページです。メールアドレスと本名は他の人には表示されません。取り扱いにご注意ください。",
         h("br"), "本名の確認は2段階です：①本人が入力（または管理者が登録）→ ②管理者が「確認済みにする」。登録から3日たっても本名が未入力のユーザーは、自動的に一時凍結されます（管理者は対象外）。"),
       h("div", { class: "search-row" }, search, nameFilter),
@@ -3436,6 +3496,26 @@ await Cloud.remove();                        // 自分の記録を消す`));
       if (location.hash === "#/account/cloud") card.scrollIntoView({ block: "start" });   // 「コネクタはこちら」のリンクから来たとき
     })();
     return slot;
+  }
+
+  // 管理者ページ：サーバーから見えるアクセス元のIPアドレス（アクセス数の判定に使う。正しく取れているかの確認用）
+  function ipCheckBox() {
+    const out = h("div", { class: "ip-out muted" });
+    const btn = h("button", { class: "btn small", type: "button" }, "サーバーから見えるIPアドレスを確認する");
+    btn.addEventListener("click", () => busy(btn, async () => {
+      const { data, error } = await sb.rpc("admin_client_ip_check");
+      if (error) throw error;
+      const d = data || {};
+      out.replaceChildren(
+        h("div", {}, "判定に使われるIP：", h("strong", {}, d.ip || "取得できませんでした")),
+        h("div", {}, "X-Forwarded-For：", d.xff || "（なし）"),
+        h("div", { class: "muted" }, d.ip
+          ? "ご自分のIPアドレス（「IPアドレス 確認」で検索すると出ます）と一致していれば、正しく取れています。違うときは、ログインしていない人のアクセス数の判定が、正しく行われません。"
+          : "IPアドレスが取れていないため、ログインしていない人のアクセス数は、ブラウザの目印で判定されます。"));
+    }));
+    return h("div", { class: "card ip-check" }, h("h2", {}, "🌐 アクセス数の判定（IPアドレス）"),
+      h("p", { class: "muted" }, "ログインしていない人のアクセス数は、アクセス元のIPアドレスで、同じ人を30分に1回だけ数えています（ログインした人は、アカウントで判定します）。"),
+      btn, out);
   }
 
   // 管理者ページ：Cloud の許可（ユーザー・申請・許可済みの投稿）
