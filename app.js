@@ -847,6 +847,7 @@
     const token = ++renderToken;
     clearInterval(dmTimer);
     if (cloudHostOff) cloudHostOff();   // 前のページのプレビューと Cloud をつなぐ窓口を閉じる
+    if (netGuardOff) netGuardOff();
     await loadAdminNames();
     { const before = dmUnread; await refreshDmUnread(); if (before !== dmUnread) renderNav(); }
     loadNotifs();   // ベルの更新（待たない）
@@ -3080,6 +3081,7 @@
       modeTabs, codeFields, fileBox,
       assetsUI.node,
       publicRow, dlRow, limitedBox,
+      cloudFormBox(post),
       field("メモ（任意）", memo, "改善した点・変更点・使い方などを自由に書けます（2000文字まで）。投稿ページに表示されます。"),
       bigBox,
       h("div", { class: "actions" }, btn, prevBtn, h("a", { class: "btn", href: back }, "キャンセル")),
@@ -3159,20 +3161,83 @@
 
   // HTMLを開いたとき、読み込みを始める前の待ち時間（サーバーの負荷を減らすため）：
   // ログインしていない人は4秒、ログインしている人は1秒。待っている間に別のページへ移ったら、読み込みは始めない
-  const OPEN_WAIT_ANON = 4, OPEN_WAIT_USER = 1;
+  const OPEN_WAIT_ANON = 4, OPEN_WAIT_USER = 1;   // 基本の待ち時間（秒）
+  const OPEN_GAP_SECS = 10;                        // 前のHTMLの読み込みを始めてから、次のHTMLの読み込みを始めるまでに、最低あける秒数
+  // 同じ人（同じブラウザ）が、続けて何個もHTMLを開かないようにする。最後に読み込みを始めた時刻は、ブラウザに覚えさせる
+  let memLastOpen = 0;
+  const lastOpenGet = cap => {
+    let t = memLastOpen;
+    try { t = Math.max(t, Number(localStorage.getItem("kh_last_open")) || 0); } catch (e) { /* メモリだけ */ }
+    return Math.min(t, cap);   // 時計を戻されて、記録が未来になっていても、10秒より長くは待たせない
+  };
+  const lastOpenSet = t => { memLastOpen = t; try { localStorage.setItem("kh_last_open", String(t)); } catch (e) { /* メモリだけ */ } };
   async function waitBeforeOpen(token) {
     const secs = session ? OPEN_WAIT_USER : OPEN_WAIT_ANON;
     // 待っている間は、中身が空っぽの（白い）ページにして、静かに待つ
     if (token !== renderToken) return false;
     app.replaceChildren();
-    const end = Date.now() + secs * 1000;
+    const startedAt = Date.now();
+    const baseEnd = startedAt + secs * 1000;
+    // 基本の待ち時間が終わったあと、前のHTMLの読み込み開始から10秒たっていなければ、その分も待つ
     for (;;) {
-      const rest = end - Date.now();
+      const rest = Math.max(baseEnd, lastOpenGet(startedAt) + OPEN_GAP_SECS * 1000) - Date.now();
       if (rest <= 0) break;
       await new Promise(r => setTimeout(r, Math.min(rest, 200)));
       if (token !== renderToken) return false;
     }
-    return token === renderToken;
+    if (token !== renderToken) return false;
+    lastOpenSet(Date.now());
+    return true;
+  }
+
+  // 未ログインの人に見せるHTMLは、インターネット通信ができないようにして実行する（ログインした人は、そのまま）。
+  //  ・CSP で、通信（fetch / XMLHttpRequest / WebSocket など）・外部の読み込み・フォーム送信を禁止する
+  //  ・CSP で止められない WebRTC は、使おうとした時点で止める
+  //  ・通信しようとしたら、親ページ（このサイト）に知らせて、警告を出す
+  const NET_CSP = "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' blob:; style-src 'unsafe-inline' data:; img-src data: blob:; media-src data: blob:; font-src data: blob:; worker-src blob:; connect-src 'none'; frame-src 'none'; form-action 'none'; object-src 'none'; base-uri 'none'";
+  const NET_GUARD = '<meta http-equiv="Content-Security-Policy" content="' + NET_CSP + '">' +
+    "<script>(function(){var s=0;function w(n){if(s)return;s=1;try{parent.postMessage({kh:'net-blocked',what:String(n||'')},'*');}catch(e){}}" +
+    "document.addEventListener('securitypolicyviolation',function(e){w(e.violatedDirective||e.effectiveDirective);},true);" +
+    "['RTCPeerConnection','webkitRTCPeerConnection','RTCDataChannel'].forEach(function(n){if(!(n in window))return;" +
+    "var f=function(){w(n);throw new Error('ログインしていないため、インターネット通信はできません');};" +
+    "try{Object.defineProperty(window,n,{value:f,writable:false,configurable:false});}catch(e){}});})();</" + "script>";
+  function withNetGuard(doc) {
+    // 必ず、文書の先頭（<!DOCTYPE> の直後）に入れる。投稿コードより前に読み込まれるようにするため
+    const m = doc.match(/^\s*<!doctype[^>]*>/i);
+    return m ? m[0] + NET_GUARD + doc.slice(m[0].length) : NET_GUARD + doc;
+  }
+
+  let netGuardOff = null;
+  function attachNetGuard(frame, token) {
+    if (netGuardOff) netGuardOff();
+    let shown = false;
+    const onMsg = ev => {
+      const d = ev.data;
+      if (!d || d.kh !== "net-blocked" || ev.source !== frame.contentWindow || token !== renderToken || shown) return;
+      shown = true;
+      showNetBlockedDialog();
+    };
+    window.addEventListener("message", onMsg);
+    netGuardOff = () => { window.removeEventListener("message", onMsg); netGuardOff = null; };
+  }
+  function showNetBlockedDialog() {
+    const host = document.fullscreenElement || document.body;   // 全画面のときも見えるように
+    const back = h("div", { class: "kh-modal-back", role: "presentation" });
+    const close = () => { back.remove(); document.removeEventListener("keydown", onKey, true); };
+    const onKey = e => { if (e.key === "Escape") { e.stopPropagation(); close(); } };
+    const login = h("button", { class: "btn primary", type: "button" }, "ログインする");
+    const ok = h("button", { class: "btn", type: "button" }, "閉じる");
+    login.addEventListener("click", () => { close(); if (document.fullscreenElement) document.exitFullscreen(); go("#/login"); });
+    ok.addEventListener("click", close);
+    back.addEventListener("click", e => { if (e.target === back) close(); });
+    back.append(h("div", { class: "kh-modal", role: "alertdialog", "aria-modal": "true", "aria-label": "インターネット通信はできません" },
+      h("h2", {}, "⚠ インターネット通信はできません"),
+      h("p", {}, "このHTMLは、インターネットで通信しようとしました。ログインしていないと、HTMLはインターネットで通信できません（通信対戦などは動きません）。"),
+      h("p", {}, "ログインすると、通信を使えるようになります。"),
+      h("div", { class: "actions" }, login, ok)));
+    host.append(back);
+    document.addEventListener("keydown", onKey, true);
+    login.focus();
   }
 
   /* ======================================================
@@ -3214,6 +3279,9 @@
     cloudHostOff = () => { window.removeEventListener("message", onMsg); cloudHostOff = null; };
   }
 
+  // Cloud コネクタの JavaScript コードの置き場所（アカウント設定の「☁ Cloudコネクタ」）への案内
+  const connectorLink = () => h("p", { class: "muted cloud-conn-link" }, h("a", { href: "#/account/cloud" }, "（CloudコネクタのJavascriptコードはこちら）"));
+
   // 投稿ページの「☁ Cloud」の欄：状態・（管理者への）申請・（管理者の）許可・記録の確認と削除
   function cloudBox(postId, firstInfo) {
     const box = h("div", { class: "cloud-box" });
@@ -3230,9 +3298,9 @@
             if (error) throw error;
             toast("Cloudを許可しました"); await reload();
           }));
-          box.replaceChildren(h("h3", {}, "☁ Cloud"), h("p", { class: "muted" }, "このHTMLには、まだCloudが許可されていません。"), on);
+          box.replaceChildren(h("h3", {}, "☁ Cloud"), h("p", { class: "muted" }, "このHTMLには、まだCloudが許可されていません。"), on, i.connector ? connectorLink() : null);
         } else if (i.requested && i.can_manage) {
-          box.replaceChildren(h("h3", {}, "☁ Cloud"), h("p", { class: "muted" }, "Cloudの利用を申請中です。管理人の許可をお待ちください。"));
+          box.replaceChildren(h("h3", {}, "☁ Cloud"), h("p", { class: "muted" }, "Cloudの利用を申請中です。管理人の許可をお待ちください。"), i.connector ? connectorLink() : null);
         } else if (i.can_request) {
           const ask = h("button", { class: "btn small", type: "button" }, "☁ Cloudの利用を申請する");
           ask.addEventListener("click", () => busy(ask, async () => {
@@ -3240,7 +3308,7 @@
             if (error) throw error;
             toast("申請しました。管理人の許可をお待ちください"); await reload();
           }));
-          box.replaceChildren(h("h3", {}, "☁ Cloud"), h("p", { class: "muted" }, "このHTMLでCloud（ユーザー名つきの自己ベストの記録）を使うには、管理人の許可が必要です。"), ask);
+          box.replaceChildren(h("h3", {}, "☁ Cloud"), h("p", { class: "muted" }, "このHTMLでCloud（ユーザー名つきの自己ベストの記録）を使うには、管理人の許可が必要です。"), ask, i.connector ? connectorLink() : null);
         } else box.replaceChildren();
         return;
       }
@@ -3248,9 +3316,8 @@
         h("p", { class: "muted" }, `このHTMLは、Cloudを使えます。記録できるのは、1人1件・数字のスコア（自己ベスト）だけです。ログインした人だけが記録され、ユーザー名がいっしょに残ります。いま${i.rows}人が記録しています（最大200人）。`),
         h("p", { class: "muted" }, "スコアの向き：", h("strong", {}, betterText(i.better)))];
       if (i.can_manage) {
-        parts.push(h("p", { class: "muted" }, i.connector
-          ? h("span", {}, "コネクタ（JavaScript）は、", h("a", { href: "#/account" }, "アカウント設定の「☁ Cloudコネクタ」"), "から受け取れます。")
-          : "コネクタ（JavaScript）の利用は、管理人に許可された人だけです。必要なときは、管理人に連絡してください。"));
+        parts.push(i.connector ? connectorLink()
+          : h("p", { class: "muted" }, "コネクタ（JavaScript）の利用は、管理人に許可された人だけです。必要なときは、管理人に連絡してください。"));
         const flip = h("button", { class: "btn small", type: "button", "data-better": i.better === "low" ? "high" : "low" },
           i.better === "low" ? "「大きいほど良い」に変える" : "「小さいほど良い」に変える");
         flip.addEventListener("click", () => busy(flip, async () => {
@@ -3311,6 +3378,30 @@
     return box;
   }
 
+  // 投稿フォーム（メモの上）の「☁ Cloudの利用を申請する」。新規の投稿では、投稿したあとに押せるようになる
+  function cloudFormBox(post) {
+    const slot = h("div", { class: "cloud-form" });
+    (async () => {
+      if (!session) return;
+      if (post) {
+        let info = null;
+        try { const r = await sb.rpc("cloud_info", { p_post: post.id }); if (!r.error && r.data) info = r.data; } catch (e) { return; }   // SQL未実行なら出さない
+        if (!info) return;
+        if (info.enabled) slot.replaceChildren(h("div", { class: "cloud-box" }, h("h3", {}, "☁ Cloud"), h("p", { class: "muted" }, "このHTMLは、Cloudを使えます。"), info.connector ? connectorLink() : null));
+        else slot.replaceChildren(cloudBox(post.id, info));
+        return;
+      }
+      let ok = false;
+      try { const r = await sb.rpc("cloud_connector_ok"); ok = !r.error && r.data === true; } catch (e) { return; }
+      if (ok) {
+        const ask = h("button", { class: "btn small", type: "button", disabled: true }, "☁ Cloudの利用を申請する");
+        slot.replaceChildren(h("div", { class: "cloud-box" }, h("h3", {}, "☁ Cloud"), ask,
+          h("p", { class: "muted" }, "投稿したあとに、押せるようになります（投稿ページや、この編集画面から申請できます）。"), connectorLink()));
+      }
+    })();
+    return slot;
+  }
+
   // アカウント設定：Cloud コネクタ（管理人に許可された人だけに、サーバーから渡す）
   function cloudConnectorCard() {
     const slot = h("div", {});
@@ -3318,7 +3409,7 @@
       if (!session) return;
       try { const r = await sb.rpc("cloud_connector_ok"); if (r.error || r.data !== true) return; } catch (e) { return; }
       const getSrc = async () => { const { data, error } = await sb.rpc("get_cloud_connector"); if (error) throw error; return data; };
-      const copy = h("button", { class: "btn", type: "button" }, "コネクタをコピー");
+      const copy = h("button", { class: "btn primary", type: "button" }, "コネクタをコピー");
       copy.addEventListener("click", () => busy(copy, async () => {
         const text = await getSrc();
         try { await navigator.clipboard.writeText(text); }
@@ -3330,17 +3421,19 @@
       }));
       const dl = h("button", { class: "btn", type: "button" }, "⬇ cloud.js をダウンロード");
       dl.addEventListener("click", () => busy(dl, async () => { download("cloud.js", new Blob([await getSrc()], { type: "text/javascript" })); }));
-      slot.replaceChildren(h("div", { class: "card form cloud-conn" },
+      const card = h("div", { class: "card form cloud-conn" },
         h("h2", {}, "☁ Cloudコネクタ"),
         h("p", { class: "muted" }, "管理人に許可された人だけが受け取れる、JavaScriptです。Cloudを許可されたHTML（投稿）に貼ると、ユーザー名つきで、スコアの自己ベストを記録・読み取りできます（1人1件・数字のスコアだけ。ログインしていない人のスコアは記録されません）。",
           "コードひろばのプレビューの中でだけ動きます（ダウンロードして単体で開くと、動きません）。このコネクタを、許可されていない人に渡さないでください。"),
-        h("pre", { class: "codeview" }, `// 使い方の例（コネクタを貼ったあと）
-const me = await Cloud.me();                 // { username } / ログインしていなければ null
+        h("div", { class: "actions" }, copy, dl),
+        h("h3", {}, "使い方の例（コネクタを貼ったあと）"),
+        h("pre", { class: "codeview" }, `const me = await Cloud.me();                 // { username } / ログインしていなければ null
 const r = await Cloud.submit(120);           // 自己ベストなら記録 → { saved, best, reason }
 const mine = await Cloud.mine();             // 自分の自己ベスト（なければ null）
 const top = await Cloud.ranking();           // みんなの記録（良い順）[{ rank, username, score, updated_at }]
-await Cloud.remove();                        // 自分の記録を消す`),
-        h("div", { class: "actions" }, copy, dl)));
+await Cloud.remove();                        // 自分の記録を消す`));
+      slot.replaceChildren(card);
+      if (location.hash === "#/account/cloud") card.scrollIntoView({ block: "start" });   // 「コネクタはこちら」のリンクから来たとき
     })();
     return slot;
   }
@@ -3551,7 +3644,8 @@ await Cloud.remove();                        // 自分の記録を消す`),
     }
 
     // タブ（プレビュー / HTML / CSS / JS）
-    const previewEl = previewWithFullscreen(previewDoc(post, assets));
+    const previewEl = previewWithFullscreen(session ? previewDoc(post, assets) : withNetGuard(previewDoc(post, assets)));
+    if (!session) attachNetGuard(previewEl.querySelector("iframe"), token);   // 未ログインでは、通信しようとしたら警告を出す
     if (cloudInfo) attachCloudHost(previewEl.querySelector("iframe"), id, token);   // Cloud コネクタからの呼び出しを受ける（許可されていなければ、サーバーが断る）
     const panels = {
       preview: previewEl,
