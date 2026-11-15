@@ -3306,9 +3306,28 @@
    *   許可されたHTMLかどうか・ログインしている人のユーザー名の記録は、すべてサーバー側で決まる
    * ==================================================== */
   let cloudHostOff = null;
+  const CLOUD_RANKING_WAIT = 2000;                // ランキングの読み込みは、呼ばれてから2秒たってから始める
+  const CLOUD_BEST_FRESH = 30 * 60 * 1000;        // ブラウザに覚えた自己ベストを、そのまま使う時間（これを過ぎたら、サーバーで確かめ直す）
+  const memBest = new Map();
   function attachCloudHost(frame, postId, token) {
     if (cloudHostOff) cloudHostOff();
     let times = [];
+    let rankingP = null;   // 待っている（読み込み中の）ランキング。続けて呼ばれたら、まとめて1回にする
+    // 自分のオンライン自己ベストを、ブラウザにも覚えさせる（ユーザーと投稿ごと）
+    const bestKey = () => (session ? `kh_best:${session.user.id}:${postId}` : null);
+    const bestGet = () => {
+      const k = bestKey(); if (!k) return undefined;
+      let v = memBest.get(k);
+      try { const raw = localStorage.getItem(k); if (raw) v = JSON.parse(raw); } catch (e) { /* メモリだけ */ }
+      return v && typeof v === "object" && "score" in v && Date.now() - v.at < CLOUD_BEST_FRESH ? v.score : undefined;
+    };
+    const bestSet = score => {
+      const k = bestKey(); if (!k) return;
+      if (score === undefined) { memBest.delete(k); try { localStorage.removeItem(k); } catch (e) { /* ok */ } return; }
+      const v = { score: score == null ? null : Number(score), at: Date.now() };
+      memBest.set(k, v);
+      try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* メモリだけ */ }
+    };
     const reply = (src, id, ok, data, error) => { try { src.postMessage({ kh: "cloud-res", id, ok, data, error }, "*"); } catch (e) { /* 閉じられた */ } };
     const onMsg = async ev => {
       const d = ev.data;
@@ -3323,14 +3342,42 @@
         const call = async (name, args) => { const r = await sb.rpc(name, args); if (r.error) throw r.error; return r.data; };
         if (d.op === "me") out = session && profile ? { username: profile.username } : null;
         else if (d.op === "info") { const i = await call("cloud_info", { p_post: postId }); out = { used: i.used, limit: i.limit, rows: i.rows, better: i.better }; }
-        else if (d.op === "list") out = await call("cloud_list", { p_post: postId });
+        else if (d.op === "list") {
+          // ランキングの読み込み：呼ばれてから2秒待って始める（待っている間に呼ばれたものは、まとめて1回）
+          if (!rankingP) {
+            rankingP = (async () => {
+              try {
+                await new Promise(r => setTimeout(r, CLOUD_RANKING_WAIT));
+                if (token !== renderToken) throw new Error("cancelled");
+                return await call("cloud_list", { p_post: postId });
+              } finally { rankingP = null; }
+            })();
+          }
+          out = await rankingP;
+          if (session && profile) { const mine = (out || []).find(x => x.username === profile.username); bestSet(mine ? mine.score : null); }   // 自分の分も、ついでに更新
+        }
+        else if (d.op === "mine") {
+          // 自分の自己ベスト：ブラウザに覚えていれば、通信しない
+          if (!session) out = null;
+          else {
+            const c = bestGet();
+            if (c !== undefined) out = c;
+            else {
+              const l = await call("cloud_list", { p_post: postId });
+              const mine = (l || []).find(x => profile && x.username === profile.username);
+              out = mine ? Number(mine.score) : null;
+              bestSet(out);
+            }
+          }
+        }
         else if (d.op === "submit") {
           const sc = Number(d.score);
           if (typeof d.score !== "number" || !isFinite(sc)) throw new Error("invalid score");
           // ログインしていない人のスコアは、記録しない（サーバーにも送らない）
           out = session ? await call("cloud_submit", { p_post: postId, p_score: sc }) : { saved: false, best: null, reason: "login" };
+          if (session && out && out.best != null) bestSet(out.best);   // 記録できたときも、記録できなかったとき（いまのベスト）も、覚える
         }
-        else if (d.op === "remove") { await call("cloud_remove", { p_post: postId }); out = true; }
+        else if (d.op === "remove") { await call("cloud_remove", { p_post: postId }); bestSet(undefined); out = true; }
         else throw new Error("unknown op");
         reply(ev.source, id, true, out);
       } catch (e) { reply(ev.source, id, false, null, friendly(e)); }
@@ -3489,8 +3536,8 @@
         h("h3", {}, "使い方の例（コネクタを貼ったあと）"),
         h("pre", { class: "codeview" }, `const me = await Cloud.me();                 // { username } / ログインしていなければ null
 const r = await Cloud.submit(120);           // 自己ベストなら記録 → { saved, best, reason }
-const mine = await Cloud.mine();             // 自分の自己ベスト（なければ null）
-const top = await Cloud.ranking();           // みんなの記録（良い順）[{ rank, username, score, updated_at }]
+const mine = await Cloud.mine();             // 自分の自己ベスト（なければ null）。ブラウザに覚えていて、すぐ返る
+const top = await Cloud.ranking();           // みんなの記録（良い順）[{ rank, username, score, updated_at }]。呼んでから2秒後に読み込みが始まる
 await Cloud.remove();                        // 自分の記録を消す`));
       slot.replaceChildren(card);
       if (location.hash === "#/account/cloud") card.scrollIntoView({ block: "start" });   // 「コネクタはこちら」のリンクから来たとき
