@@ -1422,12 +1422,13 @@
         h("span", {}, "企画主 ", nameTag(p.owner && p.owner.username)),
         h("span", {}, `投稿 ${count}件`),
         h("span", {}, `登録数 ${p.favorite_count || 0}件`),
-        h("span", {}, `アクセス数 ${p.view_count || 0}回`)));
+        h("span", {}, `アクセス数 ${p.view_count || 0}回`),
+        isAdmin && p.rank_excluded ? h("span", { class: "badge" }, "ランキング除外中（管理者にだけ表示）") : null));
   }
 
   async function viewHome() {
     const { data, error } = await sb.from("projects")
-      .select("id,title,description,allow_others_post,created_at,owner_id,favorite_count,view_count,owner:profiles!owner_id(username)")
+      .select("id,title,description,allow_others_post,created_at,owner_id,favorite_count,view_count,rank_excluded,owner:profiles!owner_id(username)")
       .order("created_at", { ascending: false });
     if (error) throw error;
     // 投稿数は、投稿の project_id だけを取得して数える（1000件ずつ）
@@ -1464,13 +1465,15 @@
     sortSel.value = "trend";   // 初期は「流行順」
     const num = v => v || 0;
     const byNew = (a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0);
+    // ランキング除外の企画は、流行順・アクセス数順・お気に入り数順では、順位をつけず、最後に回す（作成順・更新順は、そのまま）
+    const exFirst = (a, b) => (a.rank_excluded ? 1 : 0) - (b.rank_excluded ? 1 : 0);
     const sorters = {
       // 流行順：順位の良い順（直近のアクセスがない企画は最後）→ 同じなら お気に入り数 → 作成が新しい順
-      trend: (a, b) => (trendRank[a.id] || Infinity) - (trendRank[b.id] || Infinity) || num(b.view_count) - num(a.view_count) || num(b.favorite_count) - num(a.favorite_count) || byNew(a, b),
+      trend: (a, b) => exFirst(a, b) || (trendRank[a.id] || Infinity) - (trendRank[b.id] || Infinity) || num(b.view_count) - num(a.view_count) || num(b.favorite_count) - num(a.favorite_count) || byNew(a, b),
       new: byNew,
       updated: (a, b) => (a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0) || byNew(a, b),
-      views: (a, b) => num(b.view_count) - num(a.view_count) || num(b.favorite_count) - num(a.favorite_count) || byNew(a, b),
-      favs: (a, b) => num(b.favorite_count) - num(a.favorite_count) || num(b.view_count) - num(a.view_count) || byNew(a, b)
+      views: (a, b) => exFirst(a, b) || num(b.view_count) - num(a.view_count) || num(b.favorite_count) - num(a.favorite_count) || byNew(a, b),
+      favs: (a, b) => exFirst(a, b) || num(b.favorite_count) - num(a.favorite_count) || num(b.view_count) - num(a.view_count) || byNew(a, b)
     };
     let onlyMine = false;
     const mineBtn = session ? h("button", { class: "btn", type: "button" }, "自分の企画") : null;
@@ -2385,7 +2388,13 @@
     }
 
     const viewsSpan = h("span", {}, `アクセス数 ${project.view_count || 0}回`);
+    // 管理者が出した警告（みんなに見える）
+    const warnSlot = h("div", {});
+    const drawWarn = () => warnSlot.replaceChildren(project.admin_warning
+      ? h("div", { class: "admin-warning", role: "alert" }, h("strong", {}, "⚠ "), ADMIN_WARNING_TEXT) : null);
+    drawWarn();
     return h("section", {},
+      warnSlot,
       h("div", { class: "card" },
         h("div", { class: "page-head" },
           h("div", {},
@@ -2397,7 +2406,7 @@
               viewsSpan)),
           h("div", { class: "actions" }, zipBtn, assetBtn, canEditProject ? h("a", { class: "btn", href: `#/project/${id}/edit` }, "⚙ 設定") : null)),
         project.description ? h("p", { style: "white-space:pre-wrap;margin:0" }, project.description) : null),
-      isAdmin ? viewAdjustBox(project, viewsSpan) : null,
+      isAdmin ? viewAdjustBox(project, viewsSpan, drawWarn) : null,
       assetSlot,
       h("div", { class: "page-head" }, h("h2", {}, postLimit !== null ? `投稿（${posts.length} / 上限${postLimit}）` : `投稿（${posts.length}）`), h("div", { class: "actions" }, bulkBtn, postAction)),
       bulkBar,
@@ -3540,14 +3549,16 @@ await Cloud.remove();                        // 自分の記録を消す`));
   }
 
   // 管理者ページ：Cloud の許可（申請・許可済みの投稿）
+  const ADMIN_WARNING_TEXT = "Your access count has been blocked due to suspicious activity that artificially inflates it. No longer can this project stay in the rankings for much longer.";
+
   // 管理者：企画のアクセス数を、プラス・マイナスで変える（変更前に警告・理由は必須・変更の記録が残る）
-  function viewAdjustBox(project, viewsSpan) {
+  function viewAdjustBox(project, viewsSpan, drawWarn) {
     const det = h("details", { class: "card view-adjust" });
     const cur = () => Number(project.view_count) || 0;
     const modeSel = h("select", { class: "search" }, h("option", { value: "delta" }, "増やす・減らす（+ / −）"), h("option", { value: "set" }, "この数にする"));
     const numIn = h("input", { type: "number", class: "search", step: "1", placeholder: "例：-50（50減らす）／ 100（100増やす）", "aria-label": "数" });
     const reasonIn = h("input", { type: "text", class: "search", maxlength: "200", placeholder: "理由（必須・200文字まで。例：同じ人による水増し）", "aria-label": "理由" });
-    const trendCb = h("input", { type: "checkbox", checked: true });
+    const trendCb = h("input", { type: "checkbox", class: "trend-cb", checked: true });
     const go1 = h("button", { class: "btn danger", type: "button" }, "アクセス数を変更する");
     const msg = h("p", { class: "muted" });
     const logSlot = h("div", { class: "view-adjust-log" });
@@ -3585,9 +3596,35 @@ await Cloud.remove();                        // 自分の記録を消す`));
       toast("アクセス数を変更しました");
       await loadLog();
     }));
+    // 警告・カウント停止・ランキング除外（3つは、それぞれ独立）
+    const mk = (key, label, hint) => {
+      const cb = h("input", { type: "checkbox" }); cb.checked = !!project[key];
+      return { key, label, cb, row: h("label", { class: "check" }, cb, h("span", {}, label, h("span", { class: "hint" }, hint))) };
+    };
+    const mods = [
+      mk("admin_warning", "警告を表示する（みんなに見える）", "この企画を開いた画面の上部に、アクセス数の不正に関する警告を出します。"),
+      mk("views_blocked", "アクセス数のカウントを停止する", "この企画へのアクセスを、数えません（流行順の記録にも入りません）。"),
+      mk("rank_excluded", "ランキングから除外する", "流行順・アクセス数順・お気に入り数順で、順位をつけず、一覧の最後に回します（作成順・更新順はそのまま）。カウント停止とは別に、単独で使えます。")
+    ];
+    const modBtn = h("button", { class: "btn danger", type: "button" }, "この設定にする");
+    modBtn.addEventListener("click", () => busy(modBtn, async () => {
+      const ch = mods.filter(m => m.cb.checked !== !!project[m.key]);
+      if (!ch.length) { toast("変わる設定がありません"); return; }
+      const lines = ch.map(m => `・${m.label}：${m.cb.checked ? "オンにする" : "オフにする"}`).join("\n");
+      if (!confirm(`⚠ 【警告】企画「${project.title}」の設定を変更します（管理者の操作）\n\n${lines}\n\n・警告は、この企画を開いた人みんなに見えます。\n・ランキング除外は、企画の順位に、すぐ影響します。\n\n本当に変更しますか？`)) return;
+      const args = { p_project: project.id, p_warning: null, p_views_blocked: null, p_rank_excluded: null };
+      ch.forEach(m => { args[{ admin_warning: "p_warning", views_blocked: "p_views_blocked", rank_excluded: "p_rank_excluded" }[m.key]] = m.cb.checked; });
+      const r = await sb.rpc("admin_set_project_moderation", args);
+      if (r.error) throw r.error;
+      project.admin_warning = r.data.warning; project.views_blocked = r.data.views_blocked; project.rank_excluded = r.data.rank_excluded;
+      mods.forEach(m => { m.cb.checked = !!project[m.key]; });
+      drawWarn();
+      toast("設定を変更しました");
+    }));
+    const modBox = h("div", { class: "view-adjust-mod" }, h("h4", {}, "警告・カウント停止・ランキング除外"), ...mods.map(m => m.row), h("div", { class: "actions" }, modBtn));
     let loaded = false;
     det.addEventListener("toggle", () => { if (det.open && !loaded) { loaded = true; loadLog(); } });
-    det.append(h("summary", {}, "📈 アクセス数の調整（管理者）"),
+    det.append(h("summary", {}, "📈 アクセス数の調整・ランキング設定（管理者）"), modBox,
       h("p", { class: "muted" }, "不正に増やされたアクセス数を直すための機能です。変更すると、実際のアクセスではない数が表示されます。変更の前に確認の警告が出て、変更は理由つきで記録されます。"),
       h("div", { class: "search-row" }, modeSel, numIn),
       h("div", { class: "search-row" }, reasonIn),
