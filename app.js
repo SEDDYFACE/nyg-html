@@ -41,6 +41,9 @@
 
   function friendly(err) {
     const m = (err && err.message) || String(err);
+    if (/reason required/i.test(m)) return "理由を入力してください。";
+    if (/reason too long/i.test(m)) return "理由は200文字までです。";
+    if (/delta too large|invalid value/i.test(m)) return "数が大きすぎます（または、正しくありません）。";
     if (/Invalid login credentials/i.test(m)) return "ユーザー名またはパスワードが違います。";
     if (/Email not confirmed/i.test(m)) return "メールアドレスの確認が完了していません。届いたメールのリンクを開いてください。";
     if (/already been registered|already registered|email_exists|email address.*already/i.test(m)) return "そのメールアドレスは、すでに使われています。";
@@ -2381,6 +2384,7 @@
       });
     }
 
+    const viewsSpan = h("span", {}, `アクセス数 ${project.view_count || 0}回`);
     return h("section", {},
       h("div", { class: "card" },
         h("div", { class: "page-head" },
@@ -2390,9 +2394,10 @@
               project.collaborators.length ? h("span", {}, "共同編集者 ", ...project.collaborators.flatMap((c, i) => [i ? "、" : null, nameTag(c.user && c.user.username)].filter(Boolean))) : null,
               h("span", {}, fmtDate(project.created_at)),
               h("span", {}, `投稿 ${posts.length}件`), favCount,
-              h("span", {}, `アクセス数 ${project.view_count || 0}回`))),
+              viewsSpan)),
           h("div", { class: "actions" }, zipBtn, assetBtn, canEditProject ? h("a", { class: "btn", href: `#/project/${id}/edit` }, "⚙ 設定") : null)),
         project.description ? h("p", { style: "white-space:pre-wrap;margin:0" }, project.description) : null),
+      isAdmin ? viewAdjustBox(project, viewsSpan) : null,
       assetSlot,
       h("div", { class: "page-head" }, h("h2", {}, postLimit !== null ? `投稿（${posts.length} / 上限${postLimit}）` : `投稿（${posts.length}）`), h("div", { class: "actions" }, bulkBtn, postAction)),
       bulkBar,
@@ -3535,6 +3540,62 @@ await Cloud.remove();                        // 自分の記録を消す`));
   }
 
   // 管理者ページ：Cloud の許可（申請・許可済みの投稿）
+  // 管理者：企画のアクセス数を、プラス・マイナスで変える（変更前に警告・理由は必須・変更の記録が残る）
+  function viewAdjustBox(project, viewsSpan) {
+    const det = h("details", { class: "card view-adjust" });
+    const cur = () => Number(project.view_count) || 0;
+    const modeSel = h("select", { class: "search" }, h("option", { value: "delta" }, "増やす・減らす（+ / −）"), h("option", { value: "set" }, "この数にする"));
+    const numIn = h("input", { type: "number", class: "search", step: "1", placeholder: "例：-50（50減らす）／ 100（100増やす）", "aria-label": "数" });
+    const reasonIn = h("input", { type: "text", class: "search", maxlength: "200", placeholder: "理由（必須・200文字まで。例：同じ人による水増し）", "aria-label": "理由" });
+    const trendCb = h("input", { type: "checkbox", checked: true });
+    const go1 = h("button", { class: "btn danger", type: "button" }, "アクセス数を変更する");
+    const msg = h("p", { class: "muted" });
+    const logSlot = h("div", { class: "view-adjust-log" });
+    const syncMode = () => { numIn.placeholder = modeSel.value === "set" ? "新しいアクセス数（0以上）" : "例：-50（50減らす）／ 100（100増やす）"; if (modeSel.value === "set") numIn.min = "0"; else numIn.removeAttribute("min"); };
+    modeSel.addEventListener("change", syncMode);
+    async function loadLog() {
+      let r; try { r = await sb.rpc("admin_view_adjustments", { p_project: project.id, p_limit: 10 }); } catch (e) { return; }
+      if (r.error) { logSlot.replaceChildren(h("p", { class: "muted" }, "変更の記録を読めません（SQL 30 を実行したか確認してください）。")); return; }
+      const rows = r.data || [];
+      logSlot.replaceChildren(h("h4", {}, "この企画の、変更の記録（新しい順・10件まで）"),
+        rows.length ? h("ul", { class: "cloud-list" }, ...rows.map(x => h("li", {},
+          `${fmtDate(x.created_at)}　@${x.admin_name || "（削除されたユーザー）"}　${x.old_count}回 → ${x.new_count}回（${x.new_count - x.old_count >= 0 ? "+" : ""}${x.new_count - x.old_count}）${x.trend_applied ? "・流行順にも反映" : ""}　理由：${x.reason}`)))
+          : h("p", { class: "muted" }, "まだ、変更はありません。"));
+    }
+    go1.addEventListener("click", () => busy(go1, async () => {
+      const raw = numIn.value.trim();
+      if (raw === "" || !/^-?\d+$/.test(raw)) { toast("数を、整数で入力してください", true); numIn.focus(); return; }
+      const n = Number(raw), reason = reasonIn.value.trim();
+      if (!reason) { toast("理由を入力してください", true); reasonIn.focus(); return; }
+      const isSet = modeSel.value === "set";
+      if (isSet && n < 0) { toast("0以上の数を入力してください", true); return; }
+      const next = isSet ? n : Math.max(0, cur() + n), diff = next - cur();
+      if (diff === 0) { toast("変わる数がありません"); return; }
+      const trend = trendCb.checked;
+      if (!confirm(`⚠ 【警告】アクセス数を変更します（管理者の操作）\n\n企画：「${project.title}」\nいまのアクセス数：${cur()}回 → 変更後：${next}回（${diff > 0 ? "+" : ""}${diff}）\n${trend ? "流行順に使う、直近の記録にも反映します。" : "流行順の記録は、変えません。"}\n理由：${reason}\n\n・実際のアクセスではない数が表示されるようになります。\n・この変更は、あなたのユーザー名・日時・理由つきで、記録に残ります。\n\n本当に変更しますか？`)) return;
+      if (Math.abs(diff) >= 1000 && !confirm(`⚠ 変更の幅が大きいです（${diff > 0 ? "+" : ""}${diff}回）。\n\nもう一度確認します。本当に、${cur()}回 → ${next}回 に変更しますか？`)) return;
+      const r = await sb.rpc("admin_adjust_project_views", isSet
+        ? { p_project: project.id, p_delta: null, p_set_to: n, p_reason: reason, p_trend: trend }
+        : { p_project: project.id, p_delta: n, p_set_to: null, p_reason: reason, p_trend: trend });
+      if (r.error) throw r.error;
+      project.view_count = r.data.new;
+      viewsSpan.textContent = `アクセス数 ${project.view_count}回`;
+      msg.textContent = `変更しました：${r.data.old}回 → ${r.data.new}回（${r.data.changed > 0 ? "+" : ""}${r.data.changed}）`;
+      numIn.value = ""; reasonIn.value = "";
+      toast("アクセス数を変更しました");
+      await loadLog();
+    }));
+    let loaded = false;
+    det.addEventListener("toggle", () => { if (det.open && !loaded) { loaded = true; loadLog(); } });
+    det.append(h("summary", {}, "📈 アクセス数の調整（管理者）"),
+      h("p", { class: "muted" }, "不正に増やされたアクセス数を直すための機能です。変更すると、実際のアクセスではない数が表示されます。変更の前に確認の警告が出て、変更は理由つきで記録されます。"),
+      h("div", { class: "search-row" }, modeSel, numIn),
+      h("div", { class: "search-row" }, reasonIn),
+      h("label", { class: "check" }, trendCb, " 流行順の記録にも反映する（増やすときは今日に足し、減らすときは今日から古い日へさかのぼって引きます）"),
+      h("div", { class: "actions" }, go1), msg, logSlot);
+    return det;
+  }
+
   async function cloudAdminBox() {
     let ov;
     try { const r = await sb.rpc("admin_cloud_overview"); if (r.error || !r.data) return null; ov = r.data; } catch (e) { return null; }   // SQL未実行なら出さない
