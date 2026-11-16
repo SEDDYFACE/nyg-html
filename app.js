@@ -3366,7 +3366,7 @@
               const l = await call("cloud_list", { p_post: postId });
               const mine = (l || []).find(x => profile && x.username === profile.username);
               out = mine ? Number(mine.score) : null;
-              bestSet(out);
+              if (profile) bestSet(out);   // ユーザー名がまだ読み込まれていないときは、「記録なし」と覚えない
             }
           }
         }
