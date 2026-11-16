@@ -446,3 +446,14 @@ details.targets > summary.none { color: #8a5a00; }
 .cloud-usage { margin-top: .6rem; }
 .cloud-usage summary { cursor: pointer; font-weight: 600; }
 .cloud-usage pre.codeview { white-space: pre-wrap; }
+
+/* ---- 管理者：アクセス数の調整 ---- */
+.view-adjust { margin-top: 1rem; border-left: 4px solid var(--danger, #c0392b); }
+.view-adjust summary { cursor: pointer; font-weight: 600; }
+.view-adjust .search-row, .view-adjust label.check, .view-adjust .actions { margin-top: .6rem; }
+.view-adjust select, .view-adjust input[type=number] {
+  width: 100%; padding: .55rem .7rem; border: 1px solid var(--line); border-radius: 8px; background: #fff; color: var(--text); font: inherit;
+}
+.view-adjust .search-row select, .view-adjust .search-row input { flex: 1 1 14rem; width: auto; }
+.view-adjust .search-row:last-of-type { margin-bottom: 0; }
+.view-adjust-log { margin-top: 1rem; }
