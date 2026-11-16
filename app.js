@@ -62,7 +62,7 @@
     if (/cannot delete yourself/i.test(m)) return "自分自身のアカウントは削除できません。";
     if (/approval required/i.test(m)) return "500KBを超えるファイルは、管理者の許可が必要です。";
     if (/exceeds approved size/i.test(m)) return "許可されたファイルの大きさ（申請の5％増しまで）を超えています。";
-    if (/asset too large/i.test(m)) return "ファイルは1つ3MBまでです。";
+    if (/asset too large/i.test(m)) return "ファイルが、この企画の容量より大きいです（1ファイルは、企画の容量までです。容量は、管理者に要請して広げられます）。";
     if (/login required/i.test(m)) return "ログインしている人だけが、この操作をできます。";
     if (/cloud not enabled/i.test(m)) return "このHTMLには、Cloudが許可されていません。";
     if (/cloud full/i.test(m)) return "このHTMLのCloudは、記録できる人数（200人）がいっぱいです。";
@@ -78,12 +78,12 @@
     if (/group not found/i.test(m)) return "グループが見つかりません。";
     if (/asset not found/i.test(m)) return "ファイルが見つかりません（削除された可能性があります）。";
     if (/duplicate asset/i.test(m)) return "同じ名前のファイルがすでに登録されています。";
-    if (/invalid asset name/i.test(m)) return "ファイル名か、ファイルの種類が使えません（画像・音声のみ。名前に / \\ : * ? \" < > | は使えません）。";
+    if (/invalid asset name/i.test(m)) return "ファイル名か、ファイルの種類が使えません（画像・音声・JSONのみ。名前に / \\ : * ? \" < > | は使えません）。";
     if (/invalid asset data/i.test(m)) return "ファイルの中身を読み取れませんでした。";
     if (/upload missing/i.test(m)) return "ファイルの保存が確認できませんでした。もう一度お試しください。";
     if (/exceeds approved size/i.test(m)) return "許可された大きさ（申請の5％増しまで）を超えています。";
-    if (/mime type|not supported/i.test(m) && /storage|bucket|mime/i.test(m)) return "このファイルの種類は保存できません（画像・音声のみ）。";
-    if (/maximum allowed size|payload too large|too large/i.test(m)) return "ファイルが大きすぎます（1つ3MBまで）。";
+    if (/mime type|not supported/i.test(m) && /storage|bucket|mime/i.test(m)) return "このファイルの種類は保存できません（画像・音声・JSONのみ）。";
+    if (/maximum allowed size|payload too large|too large/i.test(m)) return "ファイルが大きすぎます（1つ、企画の容量まで。最大10MB）。";
     if (/row-level security|Unauthorized|not authorized/i.test(m) && /storage|bucket|object|row-level/i.test(m)) return "このファイルを保存・取り出す権限がありません。";
     if (/resource already exists|Duplicate/i.test(m)) return "同じ場所にすでにファイルがあります。もう一度お試しください。";
     if (/Object not found|not found/i.test(m) && /object|bucket/i.test(m)) return "ファイルが見つかりません。";
@@ -667,14 +667,15 @@
    * 添付ファイル（画像・音声）
    * ==================================================== */
   const ASSET_FREE = 500000;       // 許可なしで添付できる大きさ
-  const ASSET_MAX = 3000000;       // 1ファイルの上限
+  // 1ファイルの上限は、その企画の容量まで（容量が3MBなら3MB、5MBなら5MB、7MBなら7MB、10MBなら10MB）。500KBを超えるファイルは、ファイルごとに管理者の許可が必要
   const QUOTA_BASE = 3000000;      // 1企画あたりの画像・音声の容量（合計）：ふだん
   const QUOTA_MAX = 10000000;      // 管理者の許可で広げられる最大
   const quotaOf = project => (project && project.asset_quota) || QUOTA_BASE;
-  const ASSET_EXT = /\.(png|jpe?g|gif|webp|bmp|ico|avif|svg|mp3|wav|ogg|m4a|aac|flac|opus)$/i;
+  const ASSET_EXT = /\.(png|jpe?g|gif|webp|bmp|ico|avif|svg|mp3|wav|ogg|m4a|aac|flac|opus|json)$/i;
   const assetNameOk = n => !!n && n.length <= 100 && !/[\\/:*?"<>|\u0000-\u001f]/.test(n) && !/^\./.test(n) && ASSET_EXT.test(n);
   const fmtSize = b => b >= 1000000 ? (b / 1000000).toFixed(2) + "MB" : Math.max(1, Math.round(b / 1000)) + "KB";
   const isAudioName = n => /\.(mp3|wav|ogg|m4a|aac|flac|opus)$/i.test(n);
+  const isJsonName = n => /\.json$/i.test(n);
 
   function fileToB64(file) {
     return new Promise((resolve, reject) => {
@@ -2428,7 +2429,7 @@
    * 企画の画像・音声ファイル（企画ページで登録 → 使うHTML（投稿）を選ぶ）
    * ==================================================== */
   const canManageAssets = project => !!session && (project.owner_id === session.user.id || isAdmin || !!(project.myCollab && project.myCollab.can_post));
-  const assetIcon = n => (isAudioName(n) ? "🎵" : "🖼");
+  const assetIcon = n => (isAudioName(n) ? "🎵" : isJsonName(n) ? "📄" : "🖼");
   const postLabel = p => p.title + (p.is_public === false ? " 🔒" : "");
 
   // 「使うHTML」のチェック一覧。onChange(新しい選択の集合) を返す
@@ -2453,7 +2454,7 @@
   function assetUploader(ctx) {
     const node = h("div", { class: "asset-upload" });
     const picks = [];
-    const input = h("input", { type: "file", multiple: true, accept: "image/*,audio/*,.png,.jpg,.jpeg,.gif,.webp,.bmp,.ico,.avif,.svg,.mp3,.wav,.ogg,.m4a,.aac,.flac,.opus" });
+    const input = h("input", { type: "file", multiple: true, accept: "image/*,audio/*,application/json,.png,.jpg,.jpeg,.gif,.webp,.bmp,.ico,.avif,.svg,.mp3,.wav,.ogg,.m4a,.aac,.flac,.opus,.json" });
     // 📁 フォルダごと選ぶ（中の画像・音声だけを取り出す）
     const dirInput = h("input", { type: "file", webkitdirectory: true, directory: true, multiple: true, class: "hidden", "aria-label": "フォルダを選ぶ", tabindex: "-1" });
     const dirBtn = h("button", { class: "btn", type: "button", title: "フォルダの中の画像・音声を、まとめて選びます" }, "📁 フォルダを選ぶ");
@@ -2466,9 +2467,9 @@
 
     function stateOf(it) {
       const dup = ctx.getAssets().some(e => e.name === it.name) || picks.some(p => p !== it && p.name === it.name);
-      if (!assetNameOk(it.name)) return { kind: "bad", text: "使えないファイル名か、種類です（画像・音声のみ。名前に / \\ : * ? \" < > | は使えません）" };
+      if (!assetNameOk(it.name)) return { kind: "bad", text: "使えないファイル名か、種類です（画像・音声・JSONのみ。名前に / \\ : * ? \" < > | は使えません）" };
       if (dup) return { kind: "bad", text: "同じ名前のファイルがあります" };
-      if (it.size > ASSET_MAX) return { kind: "bad", text: "1ファイル3MBまでです" };
+      if (it.size > ctx.getQuota()) return { kind: "bad", text: `1ファイルは、この企画の容量（${fmtSize(ctx.getQuota())}）までです。大きいファイルは、管理者に容量を広げてもらってください` };
       if (it.size <= ASSET_FREE || isAdmin) return { kind: "ok" };
       const reqs = ctx.getReqs();
       const appr = reqs.find(r => r.status === "approved" && r.file_name === it.name && it.size <= r.limit_bytes
@@ -2494,7 +2495,7 @@
         if (st.kind === "need" || st.kind === "rejected") {
           const ask = h("button", { class: "btn small primary", type: "button" }, "管理者に許可を要請");
           ask.addEventListener("click", () => busy(ask, async () => {
-            const { error } = await sb.rpc("request_asset_upload", { p_name: it.name, p_size: it.size });
+            const { error } = await sb.rpc("request_asset_upload", { p_name: it.name, p_size: it.size, p_project: ctx.project.id });
             if (error) throw error;
             await ctx.reloadReqs();
             toast("管理者に許可を要請しました。許可されると通知が届きます");
@@ -2603,7 +2604,7 @@
     node.append(
       h("h3", {}, "⬆ ファイルを登録"),
       h("p", { class: "muted", style: "margin:.2rem 0 .6rem" },
-        "png / jpg / gif / webp / svg、mp3 / wav / ogg などを登録できます。「📁 フォルダを選ぶ」で、画像・音声を入れたフォルダをまとめて選ぶこともできます（中の画像・音声だけを選び、フォルダの中のフォルダも見ます。パソコン向けの機能です）。1ファイル500KBまではそのまま登録できます（1企画の合計は、ふだん3MBまで。管理者の許可で最大10MBまで広げられます）。500KBを超えるファイルは、ファイルごとに管理者の許可が必要です（申請した大きさの5％増しまで・最大3MB）。"),
+        "png / jpg / gif / webp / svg、mp3 / wav / ogg、json などを登録できます。「📁 フォルダを選ぶ」で、画像・音声を入れたフォルダをまとめて選ぶこともできます（中の画像・音声だけを選び、フォルダの中のフォルダも見ます。パソコン向けの機能です）。1ファイル500KBまではそのまま登録できます（1企画の合計は、ふだん3MBまで。管理者の許可で最大10MBまで広げられます）。500KBを超えるファイルは、ファイルごとに管理者の許可が必要です（申請した大きさの5％増しまで）。1ファイルの大きさは、この企画の容量（3MBの企画は3MB、5MBの企画は5MB、7MBなら7MB、10MBなら10MB）までです。"),
       h("div", { class: "pick-row" }, input, dirBtn, dirInput),
       h("div", { class: "upload-opts" }, h("label", {}, "入れるグループ：", groupSel)),
       targetBox, list, h("div", { class: "actions" }, upBtn));
@@ -3268,7 +3269,7 @@
   //  ・CSP で、通信（fetch / XMLHttpRequest / WebSocket など）・外部の読み込み・フォーム送信を禁止する
   //  ・CSP で止められない WebRTC は、使おうとした時点で止める
   //  ・通信しようとしたら、親ページ（このサイト）に知らせて、警告を出す
-  const NET_CSP = "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' blob:; style-src 'unsafe-inline' data:; img-src data: blob:; media-src data: blob:; font-src data: blob:; worker-src blob:; connect-src 'none'; frame-src 'none'; form-action 'none'; object-src 'none'; base-uri 'none'";
+  const NET_CSP = "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' blob:; style-src 'unsafe-inline' data:; img-src data: blob:; media-src data: blob:; font-src data: blob:; worker-src blob:; connect-src data:; frame-src 'none'; form-action 'none'; object-src 'none'; base-uri 'none'";
   const NET_GUARD = '<meta http-equiv="Content-Security-Policy" content="' + NET_CSP + '">' +
     "<script>(function(){var s=0;function w(n){if(s)return;s=1;try{parent.postMessage({kh:'net-blocked',what:String(n||'')},'*');}catch(e){}}" +
     "document.addEventListener('securitypolicyviolation',function(e){w(e.violatedDirective||e.effectiveDirective);},true);" +
@@ -3875,6 +3876,7 @@ await Cloud.remove();                        // 自分の記録を消す`));
           h("div", { class: "asset-grid" }, ...assets.map(a => h("div", { class: "asset-card" },
             isAudioName(a.name)
               ? h("audio", { controls: true, preload: "none", src: dataUri(a.mime, a.b64) })
+              : isJsonName(a.name) ? h("div", { class: "asset-json", "aria-label": "JSONファイル" }, "📄 JSON")
               : h("img", { src: dataUri(a.mime, a.b64), alt: a.name, loading: "lazy" }),
             h("div", { class: "asset-name" }, a.name),
             h("div", { class: "muted" }, fmtSize(a.size) + (a.group ? "・" + a.group : "")),
