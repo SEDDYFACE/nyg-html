@@ -610,14 +610,26 @@
 
   document.addEventListener("click", () => { if (bellOpen) { bellOpen = false; renderBell(); } });
   document.addEventListener("keydown", e => { if (e.key === "Escape" && bellOpen) { bellOpen = false; renderBell(); } });
-  setInterval(() => { if (session && !document.hidden) loadNotifs(); }, 60000);
-  // 新着メッセージの数（右上の「メッセージ」ボタンの数字）を、20秒ごとに更新
-  setInterval(async () => {
+  // 定期的な確認（通知・メッセージの未読数）。ログと通信を減らすため、間隔をのばしている。
+  //   ふだん：未読数は60秒ごと、通知は120秒ごと。5分以上、何も操作していないときは、未読数180秒・通知300秒ごと。
+  //   タブが隠れている間は確認しない。タブに戻ったときは、間隔を過ぎていれば、すぐ確認する。
+  const POLL = { dm: [60000, 180000], notif: [120000, 300000], idleAfter: 300000 };
+  let lastActive = Date.now(), lastDm = Date.now(), lastNotif = Date.now();
+  ["pointerdown", "keydown", "touchstart", "wheel"].forEach(ev =>
+    document.addEventListener(ev, () => { lastActive = Date.now(); }, { passive: true, capture: true }));
+  async function pollTick() {
     if (!session || document.hidden) return;
-    const before = dmUnread;
-    await refreshDmUnread();
-    if (before !== dmUnread) renderNav();
-  }, 20000);
+    const now = Date.now(), idle = now - lastActive > POLL.idleAfter ? 1 : 0;
+    if (now - lastNotif >= POLL.notif[idle]) { lastNotif = now; loadNotifs(); }
+    if (now - lastDm >= POLL.dm[idle]) {
+      lastDm = now;
+      const before = dmUnread;
+      await refreshDmUnread();
+      if (before !== dmUnread) renderNav();
+    }
+  }
+  setInterval(pollTick, 10000);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) pollTick(); });
 
   /* ======================================================
    * コードの組み立て（プレビュー / ダウンロード共通）
@@ -1714,22 +1726,49 @@
     if (pf.id === session.user.id) return h("div", { class: "error-box" }, "自分自身には送れません。");
     const me = session.user.id;
     const box = h("div", { class: "dm-box" });
+    const pair = `and(sender_id.eq.${me},recipient_id.eq.${pf.id}),and(sender_id.eq.${pf.id},recipient_id.eq.${me})`;
+    let lastAt = null;      // 最後に読んだメッセージの時刻（これより新しいものだけを、自動更新で取る）
+    let polls = 0;
+    const markReadIfNeeded = async rows => {
+      if (rows.some(m => m.recipient_id === me && !m.read_at)) {
+        await sb.rpc("mark_dm_read", { p_with: pf.id });
+        await refreshDmUnread(); renderNav();
+      }
+    };
+    // 全件を読み直す（開いたとき・自分が送信／編集／削除したとき・約1分に1回）
     async function load() {
       const { data, error } = await sb.from("direct_messages").select(DM_SELECT)
-        .or(`and(sender_id.eq.${me},recipient_id.eq.${pf.id}),and(sender_id.eq.${pf.id},recipient_id.eq.${me})`)
-        .order("created_at", { ascending: true }).limit(500);
+        .or(pair).order("created_at", { ascending: true }).limit(500);
       if (error) throw error;
       const stick = box.scrollHeight - box.scrollTop - box.clientHeight < 40 || !box.childElementCount;
       if (box.querySelector(".editing")) return;    // 編集中は、自動更新で入力を消さない
       box.replaceChildren(...(data.length ? data.map(m => dmBubble(m, me, load)) : [h("p", { class: "muted" }, "まだメッセージはありません。")]));
+      if (data.length) lastAt = data[data.length - 1].created_at;
       if (stick) box.scrollTop = box.scrollHeight;
-      if (data.some(m => m.recipient_id === me && !m.read_at)) {
-        await sb.rpc("mark_dm_read", { p_with: pf.id });
-        await refreshDmUnread(); renderNav();
-      }
+      await markReadIfNeeded(data);
+    }
+    // 自動更新：新着だけを取って、末尾に足す（新着がなければ、画面は何も変えない）
+    async function loadNew() {
+      if (lastAt === null) return load();
+      const { data, error } = await sb.from("direct_messages").select(DM_SELECT)
+        .or(pair).gt("created_at", lastAt).order("created_at", { ascending: true }).limit(200);
+      if (error) throw error;
+      if (!data.length) return;
+      if (box.querySelector(".editing")) return;    // 編集中は、あとで取る
+      const stick = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+      box.querySelector("p.muted")?.remove();       // 「まだメッセージはありません。」を消す
+      box.append(...data.map(m => dmBubble(m, me, load)));
+      lastAt = data[data.length - 1].created_at;
+      if (stick) box.scrollTop = box.scrollHeight;
+      await markReadIfNeeded(data);
     }
     await load();
-    dmTimer = setInterval(() => { if (token === renderToken && !document.hidden) load().catch(() => {}); }, 8000);
+    // ふだんは新着だけ。相手が編集・削除した内容も反映されるよう、6回に1回（約48秒ごと）は全件を読み直す。
+    dmTimer = setInterval(() => {
+      if (token !== renderToken || document.hidden) return;
+      polls++;
+      (polls % 6 === 0 ? load() : loadNew()).catch(() => {});
+    }, 8000);
 
     const ta = h("textarea", { rows: 1, placeholder: isAdmin ? "メッセージを入力（制限なし）" : "メッセージを入力" });
     ta.addEventListener("input", () => { ta.style.height = "auto"; ta.style.height = Math.min(ta.scrollHeight, 140) + "px"; });
