@@ -78,11 +78,11 @@
     if (/group not found/i.test(m)) return "グループが見つかりません。";
     if (/asset not found/i.test(m)) return "ファイルが見つかりません（削除された可能性があります）。";
     if (/duplicate asset/i.test(m)) return "同じ名前のファイルがすでに登録されています。";
-    if (/invalid asset name/i.test(m)) return "ファイル名か、ファイルの種類が使えません（画像・音声・JSONのみ。名前に / \\ : * ? \" < > | は使えません）。";
+    if (/invalid asset name/i.test(m)) return "ファイル名か、ファイルの種類が使えません（画像・音声・JSON・CSVのみ。名前に / \\ : * ? \" < > | は使えません）。";
     if (/invalid asset data/i.test(m)) return "ファイルの中身を読み取れませんでした。";
     if (/upload missing/i.test(m)) return "ファイルの保存が確認できませんでした。もう一度お試しください。";
     if (/exceeds approved size/i.test(m)) return "許可された大きさ（申請の5％増しまで）を超えています。";
-    if (/mime type|not supported/i.test(m) && /storage|bucket|mime/i.test(m)) return "このファイルの種類は保存できません（画像・音声・JSONのみ）。";
+    if (/mime type|not supported/i.test(m) && /storage|bucket|mime/i.test(m)) return "このファイルの種類は保存できません（画像・音声・JSON・CSVのみ）。";
     if (/maximum allowed size|payload too large|too large/i.test(m)) return "ファイルが大きすぎます（1つ、企画の容量まで。最大10MB）。";
     if (/row-level security|Unauthorized|not authorized/i.test(m) && /storage|bucket|object|row-level/i.test(m)) return "このファイルを保存・取り出す権限がありません。";
     if (/resource already exists|Duplicate/i.test(m)) return "同じ場所にすでにファイルがあります。もう一度お試しください。";
@@ -626,17 +626,62 @@
     return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   }
 
-  // linked=false: 1ファイルに埋め込み / linked=true: style.css, script.js を参照
+  // ---- 複数のJavaScriptファイル ----
+  // JavaScript 欄の中に、ファイルごとの区切り行（例：「/* ===== file: game.js ===== */」）を書くと、別々のファイルとして扱う。
+  // 区切り行がなければ、これまでどおり1つのファイル（script.js）。サーバー（データベース）の形は変えていない。
+  const JS_DEFAULT_NAME = "script.js";
+  const JS_MAX_FILES = 20;
+  const jsNameOk = n => /^[A-Za-z0-9_][A-Za-z0-9_.\- ]{0,58}\.js$/i.test(n) && !/\.\./.test(n);
+  const jsMarker = name => `/* ===== file: ${name} ===== */`;
+  const reEsc = t => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // JavaScript 欄の文章 → [{ name, code }]（名前がない・使えない・重なる名前には、script.js / script2.js … を付ける）
+  function parseJsFiles(js) {
+    const text = String(js || "");
+    const re = /^[ \t]*\/\*\s*=+\s*file:\s*([^\r\n*]*?)\s*=+\s*\*\/[ \t]*$/gm;
+    const chunks = [];
+    let last = 0, name = null, m, first = true;
+    // 区切りの直後の最初の改行は、区切り行の一部。次の区切りの前の空行（joinJsFiles が入れるもの）も、1つだけ取る
+    const push = (nm, code, marked, more) => {
+      if (!code.trim()) return;
+      if (marked) code = code.replace(/^\r?\n/, "");
+      if (more) code = code.replace(/(\r?\n)\r?\n$/, "$1");
+      chunks.push({ name: nm, code });
+    };
+    while ((m = re.exec(text))) { push(name, text.slice(last, m.index), !first, true); first = false; name = m[1].trim(); last = re.lastIndex; }
+    push(name, text.slice(last), !first, false);
+    const used = new Set();
+    const uniq = base => { let k = 1, c = base + ".js"; while (used.has(c.toLowerCase())) { k++; c = base + k + ".js"; } return c; };
+    return chunks.map(c => {
+      let nm = c.name && jsNameOk(c.name) && !used.has(c.name.toLowerCase()) ? c.name : uniq(c.name && jsNameOk(c.name) ? c.name.replace(/\.js$/i, "") : "script");
+      used.add(nm.toLowerCase());
+      return { name: nm, code: c.code };
+    });
+  }
+  // [{ name, text }] → JavaScript 欄の文章（1ファイルずつ、区切り行をつける）
+  const joinJsFiles = files => files.map(f => jsMarker(f.name) + "\n" + f.text.replace(/\s+$/, "") + "\n").join("\n");
+
+  const scriptInline = (code, asModule) => "<script" + (asModule ? ' type="module"' : "") + ">\n" + code.replace(/<\/script/gi, "<\\/script") + "\n</" + "script>";
+  const scriptRefRe = name => new RegExp("<script\\b[^>]*?\\bsrc\\s*=\\s*([\"']?)(?:\\./)?" + reEsc(name) + "\\1(?=[\\s>/])[^>]*>\\s*</script\\s*>", "i");
+
+  // linked=false: 1ファイルに埋め込み / linked=true: style.css, （JavaScriptの各ファイル）を参照
   function compose(p, linked) {
     const css = p.css || "";
-    const js = p.js || "";
     const styleTag = css
       ? (linked ? '<link rel="stylesheet" href="style.css">' : "<style>\n" + css.replace(/<\/style/gi, "<\\/style") + "\n</style>")
       : "";
-    const scriptTag = js
-      ? (linked ? '<script src="script.js"></' + "script>" : "<script>\n" + js.replace(/<\/script/gi, "<\\/script") + "\n</" + "script>")
-      : "";
-    const html = p.html || "";
+    let html = p.html || "";
+    // JavaScript：HTMLの中に <script src="名前.js"> があれば、そのファイルは、その位置に入れる（なければ、最後に順に並べる）
+    const pending = [];
+    for (const f of parseJsFiles(p.js)) {
+      const re = scriptRefRe(f.name);
+      const hit = html.match(re);
+      if (!hit) { pending.push(f); continue; }
+      if (linked) continue;                                     // ダウンロード（ZIP）では、HTMLの <script src> のまま、ファイルを同じ場所に置く
+      const tag = hit[0];
+      if (/\bdefer\b|\btype\s*=\s*["']?module/i.test(tag)) { html = html.replace(re, () => ""); pending.push({ ...f, mod: /\btype\s*=\s*["']?module/i.test(tag) }); }   // defer・module は、ページを読み終えてから動くので、最後に入れる
+      else html = html.replace(re, () => scriptInline(f.code));
+    }
+    const scriptTag = pending.map(f => linked ? '<script src="' + f.name + '"></' + "script>" : scriptInline(f.code, f.mod)).join("\n");
 
     // HTML欄に <html> 全体を貼った場合にも対応
     if (/<html[\s>]|<!doctype/i.test(html)) {
@@ -671,11 +716,13 @@
   const QUOTA_BASE = 3000000;      // 1企画あたりの画像・音声の容量（合計）：ふだん
   const QUOTA_MAX = 10000000;      // 管理者の許可で広げられる最大
   const quotaOf = project => (project && project.asset_quota) || QUOTA_BASE;
-  const ASSET_EXT = /\.(png|jpe?g|gif|webp|bmp|ico|avif|svg|mp3|wav|ogg|m4a|aac|flac|opus|json)$/i;
+  const ASSET_EXT = /\.(png|jpe?g|gif|webp|bmp|ico|avif|svg|mp3|wav|ogg|m4a|aac|flac|opus|json|csv)$/i;
   const assetNameOk = n => !!n && n.length <= 100 && !/[\\/:*?"<>|\u0000-\u001f]/.test(n) && !/^\./.test(n) && ASSET_EXT.test(n);
   const fmtSize = b => b >= 1000000 ? (b / 1000000).toFixed(2) + "MB" : Math.max(1, Math.round(b / 1000)) + "KB";
   const isAudioName = n => /\.(mp3|wav|ogg|m4a|aac|flac|opus)$/i.test(n);
   const isJsonName = n => /\.json$/i.test(n);
+  const isCsvName = n => /\.csv$/i.test(n);
+  const isTextDataName = n => isJsonName(n) || isCsvName(n);   // JSON・CSV：画像・音声ではない、データのファイル
 
   function fileToB64(file) {
     return new Promise((resolve, reject) => {
@@ -875,7 +922,7 @@
     const zip = new JSZip();
     zip.file("index.html", compose(p, true));
     if (p.css) zip.file("style.css", p.css);
-    if (p.js) zip.file("script.js", p.js);
+    parseJsFiles(p.js).forEach(f => zip.file(f.name, f.code));
     if (p.memo) zip.file("memo.txt", p.memo);
     // 添付ファイルは index.html と同じ場所に入れる（<img src="photo.png"> のまま参照できる）
     (assets || []).forEach(a => zip.file(a.name, b64ToBytes(a.b64)));
@@ -894,7 +941,7 @@
       const dir = zip.folder(String(i + 1).padStart(2, "0") + "_" + safeName(p.title));
       dir.file("index.html", compose(p, true));
       if (p.css) dir.file("style.css", p.css);
-      if (p.js) dir.file("script.js", p.js);
+      parseJsFiles(p.js).forEach(f => dir.file(f.name, f.code));
       if (p.memo) dir.file("memo.txt", p.memo);
       (assetRows || []).filter(a => a.post_id === p.id).forEach(a => dir.file(a.name, b64ToBytes(a.b64)));
     });
@@ -2391,8 +2438,9 @@
     const viewsSpan = h("span", {}, `アクセス数 ${project.view_count || 0}回`);
     // 管理者が出した警告（みんなに見える）
     const warnSlot = h("div", {});
-    const drawWarn = () => warnSlot.replaceChildren(project.admin_warning
-      ? h("div", { class: "admin-warning", role: "alert" }, h("strong", {}, "⚠ "), ADMIN_WARNING_TEXT) : null);
+    // replaceChildren(null) は「null」という文字を入れてしまうので、ないときは、何も渡さない
+    const drawWarn = () => warnSlot.replaceChildren(...(project.admin_warning
+      ? [h("div", { class: "admin-warning", role: "alert" }, h("strong", {}, "⚠ "), ADMIN_WARNING_TEXT)] : []));
     drawWarn();
     return h("section", {},
       warnSlot,
@@ -2429,7 +2477,7 @@
    * 企画の画像・音声ファイル（企画ページで登録 → 使うHTML（投稿）を選ぶ）
    * ==================================================== */
   const canManageAssets = project => !!session && (project.owner_id === session.user.id || isAdmin || !!(project.myCollab && project.myCollab.can_post));
-  const assetIcon = n => (isAudioName(n) ? "🎵" : isJsonName(n) ? "📄" : "🖼");
+  const assetIcon = n => (isAudioName(n) ? "🎵" : isTextDataName(n) ? "📄" : "🖼");
   const postLabel = p => p.title + (p.is_public === false ? " 🔒" : "");
 
   // 「使うHTML」のチェック一覧。onChange(新しい選択の集合) を返す
@@ -2454,7 +2502,7 @@
   function assetUploader(ctx) {
     const node = h("div", { class: "asset-upload" });
     const picks = [];
-    const input = h("input", { type: "file", multiple: true, accept: "image/*,audio/*,application/json,.png,.jpg,.jpeg,.gif,.webp,.bmp,.ico,.avif,.svg,.mp3,.wav,.ogg,.m4a,.aac,.flac,.opus,.json" });
+    const input = h("input", { type: "file", multiple: true, accept: "image/*,audio/*,application/json,text/csv,.png,.jpg,.jpeg,.gif,.webp,.bmp,.ico,.avif,.svg,.mp3,.wav,.ogg,.m4a,.aac,.flac,.opus,.json,.csv" });
     // 📁 フォルダごと選ぶ（中の画像・音声だけを取り出す）
     const dirInput = h("input", { type: "file", webkitdirectory: true, directory: true, multiple: true, class: "hidden", "aria-label": "フォルダを選ぶ", tabindex: "-1" });
     const dirBtn = h("button", { class: "btn", type: "button", title: "フォルダの中の画像・音声を、まとめて選びます" }, "📁 フォルダを選ぶ");
@@ -2467,7 +2515,7 @@
 
     function stateOf(it) {
       const dup = ctx.getAssets().some(e => e.name === it.name) || picks.some(p => p !== it && p.name === it.name);
-      if (!assetNameOk(it.name)) return { kind: "bad", text: "使えないファイル名か、種類です（画像・音声・JSONのみ。名前に / \\ : * ? \" < > | は使えません）" };
+      if (!assetNameOk(it.name)) return { kind: "bad", text: "使えないファイル名か、種類です（画像・音声・JSON・CSVのみ。名前に / \\ : * ? \" < > | は使えません）" };
       if (dup) return { kind: "bad", text: "同じ名前のファイルがあります" };
       if (it.size > ctx.getQuota()) return { kind: "bad", text: `1ファイルは、この企画の容量（${fmtSize(ctx.getQuota())}）までです。大きいファイルは、管理者に容量を広げてもらってください` };
       if (it.size <= ASSET_FREE || isAdmin) return { kind: "ok" };
@@ -2604,7 +2652,7 @@
     node.append(
       h("h3", {}, "⬆ ファイルを登録"),
       h("p", { class: "muted", style: "margin:.2rem 0 .6rem" },
-        "png / jpg / gif / webp / svg、mp3 / wav / ogg、json などを登録できます。「📁 フォルダを選ぶ」で、画像・音声を入れたフォルダをまとめて選ぶこともできます（中の画像・音声だけを選び、フォルダの中のフォルダも見ます。パソコン向けの機能です）。1ファイル500KBまではそのまま登録できます（1企画の合計は、ふだん3MBまで。管理者の許可で最大10MBまで広げられます）。500KBを超えるファイルは、ファイルごとに管理者の許可が必要です（申請した大きさの5％増しまで）。1ファイルの大きさは、この企画の容量（3MBの企画は3MB、5MBの企画は5MB、7MBなら7MB、10MBなら10MB）までです。"),
+        "png / jpg / gif / webp / svg、mp3 / wav / ogg / m4a、json、csv などを登録できます。「📁 フォルダを選ぶ」で、画像・音声を入れたフォルダをまとめて選ぶこともできます（中の画像・音声だけを選び、フォルダの中のフォルダも見ます。パソコン向けの機能です）。1ファイル500KBまではそのまま登録できます（1企画の合計は、ふだん3MBまで。管理者の許可で最大10MBまで広げられます）。500KBを超えるファイルは、ファイルごとに管理者の許可が必要です（申請した大きさの5％増しまで）。1ファイルの大きさは、この企画の容量（3MBの企画は3MB、5MBの企画は5MB、7MBなら7MB、10MBなら10MB）までです。"),
       h("div", { class: "pick-row" }, input, dirBtn, dirInput),
       h("div", { class: "upload-opts" }, h("label", {}, "入れるグループ：", groupSel)),
       targetBox, list, h("div", { class: "actions" }, upBtn));
@@ -3080,52 +3128,70 @@
     const codeFields = h("div", {},
       field("HTML", html, "<body> の中身でも、<html> から始まる完全なHTMLでもOK。CSS や JavaScript をこの中（<style> / <script>）に直接書く場合は、下の欄は空のままで大丈夫です。"),
       field("CSS（任意）", css, "HTMLの中に <style> で書いた場合は空のままでOK"),
-      field("JavaScript（任意）", js, "HTMLの中に <script> で書いた場合は空のままでOK"));
+      field("JavaScript（任意）", js, "HTMLの中に <script> で書いた場合は空のままでOK。複数のJavaScriptファイルにするときは、ファイルごとの先頭に、区切りの行（例：/* ===== file: game.js ===== */）を書きます。区切りより前の部分は script.js になります。HTMLの中の <script src=\"game.js\"> は、そのファイルの中身がその位置で動き、ほかのファイルは、HTMLの最後に、書いた順に入ります（ZIPでは、別々のファイルになります）。"));
 
     const fileInput = h("input", { type: "file", accept: ".html,.htm,.css,.js", multiple: true });
     const fileInfo = h("ul", { class: "file-list" });
     const fileBox = h("div", { class: "hidden" },
       field("ファイルを選択", fileInput,
-        ".html（.htm）・.css・.js のファイルを選べます（複数選択可、各種類1つずつ、各500KBまで）。HTMLだけでもOKです。選んだ内容は「コード入力」に切り替えて確認・修正できます。"),
+        ".html（.htm）・.css・.js のファイルを選べます（複数選択可。HTML・CSSは1つずつ、JavaScriptは複数（20個まで）。各500KBまで）。HTMLだけでもOKです。JavaScriptは、選んだ順（並べ替えできます）に動きます。HTMLの中の <script src=\"ファイル名.js\"> は、そのファイルの中身がその位置で動きます。選んだ内容は「コード入力」に切り替えて確認・修正できます。"),
       fileInfo);
 
-    function showFileInfo(items, errors) {
+    // 選んだファイル（HTML・CSSは1つずつ、JavaScriptは複数）。JavaScriptは、並べ替え・外すことができる
+    const sel = { html: null, css: null, js: [] };
+    let selErrs = [];
+    function applySel() {
+      html.value = sel.html ? sel.html.text : "";
+      css.value = sel.css ? sel.css.text : "";
+      js.value = sel.js.length ? joinJsFiles(sel.js) : "";
+    }
+    function showFileInfo() {
       fileInfo.replaceChildren();
-      items.forEach(t => fileInfo.append(h("li", { class: "ok" }, "✓ " + t)));
-      errors.forEach(t => fileInfo.append(h("li", { class: "ng" }, "× " + t)));
+      const row = (label, extra) => fileInfo.append(h("li", { class: "ok" }, "✓ " + label, extra || null));
+      if (sel.html) row(`${sel.html.name}（HTML）`);
+      if (sel.css) row(`${sel.css.name}（CSS）`);
+      sel.js.forEach((f, i) => {
+        const mv = (d, t, lbl) => h("button", { class: "btn small", type: "button", title: t, "aria-label": t, disabled: i + d < 0 || i + d >= sel.js.length, onclick: () => { const x = sel.js.splice(i, 1)[0]; sel.js.splice(i + d, 0, x); applySel(); showFileInfo(); } }, lbl);
+        const rm = h("button", { class: "btn small", type: "button", title: "このファイルを外す", "aria-label": "このファイルを外す", onclick: () => { sel.js.splice(i, 1); applySel(); showFileInfo(); } }, "外す");
+        row(`${f.name}（JavaScript ${i + 1}/${sel.js.length}）`, h("span", { class: "file-move" }, " ", mv(-1, "1つ前へ", "↑"), mv(1, "1つ後ろへ", "↓"), rm));
+      });
+      selErrs.forEach(t => fileInfo.append(h("li", { class: "ng" }, "× " + t)));
     }
 
     fileInput.addEventListener("change", async () => {
       const files = [...fileInput.files];
-      if (!files.length) { showFileInfo([], []); return; }
-      const found = {};
-      const okList = [];
+      if (!files.length) { sel.html = sel.css = null; sel.js = []; selErrs = []; applySel(); showFileInfo(); return; }
+      const next = { html: null, css: null, js: [] };
       const errs = [];
       let needBig = false;
       for (const f of files) {
         const ext = (f.name.split(".").pop() || "").toLowerCase();
         const kind = ext === "html" || ext === "htm" ? "html" : ext === "css" ? "css" : ext === "js" ? "js" : null;
         if (!kind) { errs.push(`${f.name}：対応していない形式です（.html / .css / .js のみ）`); continue; }
-        if (found[kind]) { errs.push(`${f.name}：${kind.toUpperCase()} は1つだけ選べます`); continue; }
+        if (kind !== "js" && next[kind]) { errs.push(`${f.name}：${kind.toUpperCase()} は1つだけ選べます`); continue; }
+        if (kind === "js" && next.js.length >= JS_MAX_FILES) { errs.push(`${f.name}：JavaScriptは${JS_MAX_FILES}個までです`); continue; }
+        if (kind === "js" && !jsNameOk(f.name)) { errs.push(`${f.name}：JavaScriptのファイル名に使えない文字があります（英数字・_ - . 空白、60文字まで）`); continue; }
+        if (kind === "js" && next.js.some(x => x.name.toLowerCase() === f.name.toLowerCase())) { errs.push(`${f.name}：同じ名前のJavaScriptがあります`); continue; }
         if (f.size > BIG_MAX * 4) { errs.push(`${f.name}：大きすぎます（最大2MBまで）`); continue; }
         const text = await f.text();
         if (text.length > BIG_MAX) { errs.push(`${f.name}：大きすぎます（最大2MBまで）`); continue; }
         if (text.length > cap()) { errs.push(`${f.name}：500KBを超えています（管理者の承認が必要です）`); needBig = true; continue; }
         if (text.includes("\u0000")) { errs.push(`${f.name}：テキストファイルではありません`); continue; }
-        found[kind] = text;
-        okList.push(`${f.name}（${kind.toUpperCase()}）`);
+        if (kind === "js") next.js.push({ name: f.name, text }); else next[kind] = { name: f.name, text };
       }
-      if (okList.length) {
-        html.value = found.html || "";
-        css.value = found.css || "";
-        js.value = found.js || "";
+      if (next.html || next.css || next.js.length) {
+        sel.html = next.html; sel.css = next.css; sel.js = next.js;
+        // JavaScriptの合計（区切り行をふくむ）が上限を超えるときは、先に知らせる
+        if (sel.js.length && joinJsFiles(sel.js).length > cap()) { errs.push(`JavaScriptの合計が500KBを超えています（管理者の承認が必要です）`); needBig = true; }
+        applySel();
         // タイトルが空、または前回ファイル名から自動で入れたままなら、選択したファイル名（HTML優先）を入れる
         if (!title.value.trim() || titleAuto) {
           const pick = files.find(f => /\.html?$/i.test(f.name)) || files.find(f => /\.(css|js)$/i.test(f.name));
           if (pick) { title.value = pick.name.replace(/\.[^.]+$/, "").slice(0, 80); titleAuto = true; }
         }
       }
-      showFileInfo(okList, errs);
+      selErrs = errs;
+      showFileInfo();
       if (needBig && !isAdmin) showBigNotice();
     });
 
@@ -3840,7 +3906,8 @@ await Cloud.remove();                        // 自分の記録を消す`));
       css: h("pre", { class: "codeview" }, post.css || "（なし）"),
       js: h("pre", { class: "codeview" }, post.js || "（なし）")
     };
-    const labels = codeOk ? { preview: "プレビュー", html: "HTML", css: "CSS", js: "JavaScript" } : { preview: "プレビュー" };
+    const jsCount = parseJsFiles(post.js).length;
+    const labels = codeOk ? { preview: "プレビュー", html: "HTML", css: "CSS", js: jsCount > 1 ? `JavaScript（${jsCount}個）` : "JavaScript" } : { preview: "プレビュー" };
     const tabs = h("div", { class: "tabs" });
     const body = h("div", {});
     function show(key) {
@@ -3876,7 +3943,7 @@ await Cloud.remove();                        // 自分の記録を消す`));
           h("div", { class: "asset-grid" }, ...assets.map(a => h("div", { class: "asset-card" },
             isAudioName(a.name)
               ? h("audio", { controls: true, preload: "none", src: dataUri(a.mime, a.b64) })
-              : isJsonName(a.name) ? h("div", { class: "asset-json", "aria-label": "JSONファイル" }, "📄 JSON")
+              : isTextDataName(a.name) ? h("div", { class: "asset-json", "aria-label": isCsvName(a.name) ? "CSVファイル" : "JSONファイル" }, isCsvName(a.name) ? "📄 CSV" : "📄 JSON")
               : h("img", { src: dataUri(a.mime, a.b64), alt: a.name, loading: "lazy" }),
             h("div", { class: "asset-name" }, a.name),
             h("div", { class: "muted" }, fmtSize(a.size) + (a.group ? "・" + a.group : "")),
