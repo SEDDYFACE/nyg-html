@@ -52,6 +52,7 @@
     if (/rate limit|too many(?! (assets|posts))/i.test(m)) return "短時間に操作が多すぎます。しばらくしてからやり直してください。";
     if (/row-level security/i.test(m)) return "この操作を行う権限がありません。";
     if (/duplicate key/i.test(m)) return "既に使われています。";
+    if (/posts_js_files_check/i.test(m)) return `JavaScriptのファイルは、1つの投稿に${JS_MAX_FILES}個までです。`;
     if (/file too large/i.test(m)) return "500KBを超えるコードは、管理者の承認が必要です（残り回数がありません）。";
     if (/already pending/i.test(m)) return "すでに要請を送信済みです。管理者の承認をお待ちください。";
     if (/already decided/i.test(m)) return "この要請は、すでに回答済みです。";
@@ -1892,7 +1893,20 @@
         go("#/");
       });
     });
-    return h("div", {}, form, realNameCard(), emailCard(), passwordCard());
+    return h("div", {}, form, cloudConnectorCard(), realNameCard(), emailCard(), passwordCard());
+  }
+
+  // アカウント設定：Cloud コネクタ（許可されたユーザーと管理者にだけ出る）
+  function cloudConnectorCard() {
+    const card = h("div", { class: "card form hidden" });
+    (async () => {
+      try { const r = await sb.rpc("cloud_connector_ok"); if (r.error || r.data !== true) return; } catch (e) { return; }   // 許可されていない人・SQL未実行なら、出さない
+      card.append(h("h2", {}, "☁ Cloud コネクタ"),
+        h("p", { class: "muted" }, "管理者に許可されたため、Cloudコネクタ（JavaScript）を使えます。Cloudが許可されたHTMLの <script> の中に貼って使います。"),
+        cloudConnectorBox());
+      card.classList.remove("hidden");
+    })();
+    return card;
   }
 
   // 自分の本名（1段階目：本人の入力 → 2段階目：管理者の確認）
@@ -3150,9 +3164,19 @@
         showBigNotice();
       }));
       bigBox.replaceChildren(
-        h("p", { style: "margin:0 0 .4rem" }, "500KBを超えるコードを投稿するには、管理者の承認が必要です。承認されると、最大2MBのコードを、認められた回数だけ投稿できます。"),
+        h("p", { style: "margin:0 0 .4rem" }, "500KBを超えるコードを投稿するには、管理者の承認が必要です（JavaScriptを複数のファイルにしたときは、全ファイルの合計が500KBを超える場合です）。承認されると、最大2MBのコードを、認められた回数だけ投稿できます。"),
         note, h("div", { class: "actions", style: "margin-top:.4rem" }, send));
     }
+
+    // 書いている途中でも、500KBを超えたら、すぐに要請の欄を出す（管理者は上限が大きいので、出さない）
+    let bigShown = false;
+    const checkBigLive = () => {
+      if (isAdmin) return;
+      const over = [html, css, js].some(el => el.value.length > cap());
+      if (over && !bigShown) { bigShown = true; showBigNotice(); }
+      else if (!over && bigShown) { bigShown = false; bigBox.classList.add("hidden"); }
+    };
+    [html, css, js].forEach(el => el.addEventListener("input", checkBigLive));
 
     const previewBox = h("div", { class: "preview-box hidden" });
     const assetsUI = assetSelect(project, post);
@@ -3221,7 +3245,7 @@
       if (next.html || next.css || next.js.length) {
         sel.html = next.html; sel.css = next.css; sel.js = next.js;
         // JavaScriptの合計（区切り行をふくむ）が上限を超えるときは、先に知らせる
-        if (sel.js.length && joinJsFiles(sel.js).length > cap()) { errs.push(`JavaScriptの合計が500KBを超えています（管理者の承認が必要です）`); needBig = true; }
+        if (sel.js.length && joinJsFiles(sel.js).length > cap()) { errs.push(`JavaScriptの合計（${sel.js.length}個）が${kb(joinJsFiles(sel.js).length)}で、500KBを超えています（管理者の承認が必要です。下の欄から、管理者に要請できます）`); needBig = true; }
         applySel();
         // タイトルが空、または前回ファイル名から自動で入れたままなら、選択したファイル名（HTML優先）を入れる
         if (!title.value.trim() || titleAuto) {
@@ -3273,11 +3297,14 @@
         const row = { title: title.value.trim(), html: html.value, css: css.value, js: js.value, memo: memo.value.trim(), is_public: isPublic.checked, allow_download: allowDl.checked };
         if (!row.title) throw new Error("タイトルを入力してください。");
         if (!row.html.trim() && !row.css.trim() && !row.js.trim()) throw new Error("HTML / CSS / JavaScript のいずれかを入力してください。");
+        if (parseJsFiles(row.js).length > JS_MAX_FILES) throw new Error(`JavaScriptのファイルは、1つの投稿に${JS_MAX_FILES}個までです（いまは${parseJsFiles(row.js).length}個）。`);
         for (const k of ["html", "css", "js"]) {
           if (row[k].length > BIG_MAX) throw new Error(`${k.toUpperCase()} が大きすぎます（最大2MBまで）。`);
           if (row[k].length > cap()) {
             showBigNotice();
-            throw new Error(`${k.toUpperCase()} が500KBを超えています。管理者の承認が必要です（下の「要請」から申請できます）。`);
+            throw new Error(k === "js" && parseJsFiles(row.js).length > 1
+              ? `JavaScriptの合計（${parseJsFiles(row.js).length}個）が500KBを超えています。管理者の承認が必要です（下の「要請」から申請できます）。`
+              : `${k.toUpperCase()} が500KBを超えています。管理者の承認が必要です（下の「要請」から申請できます）。`);
           }
         }
         // 承認済みの回数を使う投稿（すでに大容量の投稿の編集は消費しない）
@@ -3506,16 +3533,38 @@
     cloudHostOff = () => { window.removeEventListener("message", onMsg); cloudHostOff = null; };
   }
 
-  // Cloud の使い方（HTMLのJavaScriptから）。コネクタは、許可されたHTMLのプレビューに、サイトが自動で入れる
-  const cloudUsage = () => h("details", { class: "cloud-usage" },
-    h("summary", {}, "Cloudの使い方（HTMLのJavaScriptから）"),
-    h("p", { class: "muted" }, "Cloudが許可されたHTMLのプレビューには、サイトが、コネクタを自動で入れます（HTMLに貼る必要はありません）。保存できるのは、1人1件の数字のスコア（自己ベスト）だけで、ログインしている人だけが記録され、ユーザー名がいっしょに残ります（ログインしていない人のスコアは記録されません）。",
-      "ダウンロードしたHTML・ZIPにはコネクタが入らないので、typeof Cloud === \"undefined\" で調べて、Cloudなしでも動くようにしておいてください。"),
-    h("pre", { class: "codeview" }, `const me = await Cloud.me();                 // { username } / ログインしていなければ null
-const r = await Cloud.submit(120);           // 自己ベストなら記録 → { saved, best, reason }
-const mine = await Cloud.mine();             // 自分の自己ベスト（なければ null）。ブラウザに覚えていて、すぐ返る
-const top = await Cloud.ranking();           // みんなの記録（良い順）[{ rank, username, score, updated_at }]。呼んでから2秒後に読み込みが始まる
-await Cloud.remove();                        // 自分の記録を消す`));
+  // Cloud コネクタ（JavaScript）の表示・コピー。コネクタを許可されたユーザー（と管理者）だけが取得できる
+  function copyText(text, ta) {
+    if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(text);
+    ta.focus(); ta.select();
+    return document.execCommand("copy") ? Promise.resolve() : Promise.reject(new Error("コピーできませんでした。選んで、手動でコピーしてください。"));
+  }
+  const cloudConnectorBox = () => {
+    const det = h("details", { class: "cloud-usage cloud-conn" }, h("summary", {}, "Cloudコネクタ（JavaScript）を表示・コピーする"));
+    const body = h("div", {});
+    det.append(body);
+    let loaded = false;
+    det.addEventListener("toggle", async () => {
+      if (!det.open || loaded) return;
+      loaded = true;
+      body.replaceChildren(h("p", { class: "muted" }, "読み込み中…"));
+      let data = null, error = null;
+      try { ({ data, error } = await sb.rpc("get_cloud_connector")); } catch (e) { error = e; }
+      if (error || typeof data !== "string" || !data) {
+        loaded = false;
+        body.replaceChildren(h("p", { class: "muted" }, "コネクタを取得できませんでした。コネクタを使えるのは、管理者に許可されたユーザーだけです。"));
+        return;
+      }
+      const ta = h("textarea", { class: "codeview", readonly: true, rows: 10 });
+      ta.value = data;
+      const copy = h("button", { class: "btn small primary", type: "button" }, "📋 コピーする");
+      copy.addEventListener("click", () => busy(copy, async () => { await copyText(data, ta); toast("コネクタをコピーしました"); }));
+      body.replaceChildren(
+        h("p", { class: "muted" }, "このコネクタを、Cloudが許可されたHTMLの <script> の中に貼って使います（コードの関数を変える必要はありません）。使えるのは、コードひろばのプレビューの中だけです。"),
+        ta, h("div", { class: "actions" }, copy));
+    });
+    return det;
+  };
 
   // 投稿ページの「☁ Cloud」の欄：状態・（管理者への）申請・（管理者の）許可・記録の確認と削除
   function cloudBox(postId, firstInfo) {
@@ -3531,7 +3580,7 @@ await Cloud.remove();                        // 自分の記録を消す`));
           on.addEventListener("click", () => busy(on, async () => {
             const { error } = await sb.rpc("admin_set_cloud_post", { p_post: postId, p_on: true });
             if (error) throw error;
-            toast("Cloudを許可しました（プレビューに反映するには、ページを開き直してください）"); await reload();
+            toast("Cloudを許可しました"); await reload();
           }));
           box.replaceChildren(h("h3", {}, "☁ Cloud"), h("p", { class: "muted" }, "このHTMLには、まだCloudが許可されていません。"), on);
         } else if (i.requested && i.can_manage) {
@@ -3551,7 +3600,7 @@ await Cloud.remove();                        // 自分の記録を消す`));
         h("p", { class: "muted" }, `このHTMLは、Cloudを使えます。記録できるのは、1人1件・数字のスコア（自己ベスト）だけです。ログインした人だけが記録され、ユーザー名がいっしょに残ります。いま${i.rows}人が記録しています（最大200人）。`),
         h("p", { class: "muted" }, "スコアの向き：", h("strong", {}, betterText(i.better)))];
       if (i.can_manage) {
-        parts.push(cloudUsage());
+        if (i.connector) parts.push(cloudConnectorBox());
         const flip = h("button", { class: "btn small", type: "button", "data-better": i.better === "low" ? "high" : "low" },
           i.better === "low" ? "「大きいほど良い」に変える" : "「小さいほど良い」に変える");
         flip.addEventListener("click", () => busy(flip, async () => {
@@ -3617,19 +3666,19 @@ await Cloud.remove();                        // 自分の記録を消す`));
     const slot = h("div", { class: "cloud-form" });
     (async () => {
       if (!session) return;
-      try { const r = await sb.rpc("cloud_connector_for_post", { p_post: "00000000-0000-0000-0000-000000000000" }); if (r.error) return; } catch (e) { return; }   // SQL未実行なら出さない
+      try { const r = await sb.rpc("cloud_connector_ok"); if (r.error || r.data !== true) return; } catch (e) { return; }   // コネクタを許可されていない人・SQL未実行なら、出さない
       if (post) {
         let info = null;
         try { const r = await sb.rpc("cloud_info", { p_post: post.id }); if (!r.error && r.data) info = r.data; } catch (e) { return; }
         if (!info) return;
         if (!info.enabled && !info.can_request && !info.requested && !isAdmin) return;   // 申請も許可もできない人には出さない
-        if (info.enabled) slot.replaceChildren(h("div", { class: "cloud-box" }, h("h3", {}, "☁ Cloud"), h("p", { class: "muted" }, "このHTMLは、Cloudを使えます。"), cloudUsage()));
-        else slot.replaceChildren(cloudBox(post.id, info), h("div", { class: "cloud-box" }, cloudUsage()));
+        if (info.enabled) slot.replaceChildren(h("div", { class: "cloud-box" }, h("h3", {}, "☁ Cloud"), h("p", { class: "muted" }, "このHTMLは、Cloudを使えます。"), cloudConnectorBox()));
+        else slot.replaceChildren(cloudBox(post.id, info), h("div", { class: "cloud-box" }, cloudConnectorBox()));
         return;
       }
       const ask = h("button", { class: "btn small", type: "button", disabled: true }, "☁ Cloudの利用を申請する");
       slot.replaceChildren(h("div", { class: "cloud-box" }, h("h3", {}, "☁ Cloud"), ask,
-        h("p", { class: "muted" }, "投稿したあとに、押せるようになります（投稿ページや、この編集画面から申請できます）。"), cloudUsage()));
+        h("p", { class: "muted" }, "投稿したあとに、押せるようになります（投稿ページや、この編集画面から申請できます）。"), cloudConnectorBox()));
     })();
     return slot;
   }
@@ -3749,6 +3798,17 @@ await Cloud.remove();                        // 自分の記録を消す`));
       ov = r.data; draw();
     }
     const act = (btn, fn, msg) => btn.addEventListener("click", () => busy(btn, async () => { await fn(); toast(msg); await reload(); }));
+    // コネクタを許可するユーザーを、ユーザー名で追加する
+    const grantName = h("input", { type: "text", placeholder: "ユーザー名", maxlength: 20, autocomplete: "off", "aria-label": "コネクタを許可するユーザー名" });
+    const grantBtn = h("button", { class: "btn small primary", type: "button" }, "許可する");
+    act(grantBtn, async () => {
+      const name = grantName.value.trim().replace(/^@/, "");
+      if (!name) throw new Error("ユーザー名を入力してください。");
+      const { error } = await sb.rpc("admin_set_cloud_user", { p_username: name, p_on: true });
+      if (error) throw error;
+      grantName.value = "";
+    }, "コネクタの使用を許可しました");
+    const userGrant = h("div", { class: "actions", style: "margin:.4rem 0 .8rem" }, grantName, grantBtn);
     function draw() {
       const reqs = ov.requests.length ? ov.requests.map(r => {
         const ok = h("button", { class: "btn small primary", type: "button", "data-ok": r.post_id }, "許可");
@@ -3764,7 +3824,14 @@ await Cloud.remove();                        // 自分の記録を消す`));
       }) : [h("li", { class: "muted" }, "まだありません。")];
       box.replaceChildren(
         h("h2", {}, "☁ Internet Cloud"),
-        h("p", { class: "muted" }, "Cloudを使えるのは、管理者が許可したHTML（投稿）だけです。Cloudに記録できるのは、1つのHTMLにつき、1人1件の数字のスコア（自己ベスト）だけです。許可したHTMLのプレビューには、サイトが、コネクタ（JavaScript）を自動で入れます。投稿者は、自分の投稿ページ・編集画面から申請できます。管理者は、申請を許可するか、各投稿のページから直接許可できます。"),
+        h("p", { class: "muted" }, "Cloudを使えるのは、管理者が許可したHTML（投稿）だけです。Cloudに記録できるのは、1つのHTMLにつき、1人1件の数字のスコア（自己ベスト）だけです。コネクタ（JavaScript）は、下で許可したユーザーだけが、自分のHTMLの <script> の中に貼って使えます。許可されたユーザーは、自分の投稿ページ・編集画面から、Cloudの利用を申請できます。管理者は、申請を許可するか、各投稿のページから直接許可できます。"),
+        h("h3", {}, `コネクタを使えるユーザー（${(ov.users || []).length}）`),
+        h("ul", { class: "cloud-list" }, ...((ov.users || []).length ? ov.users.map(u => {
+          const off = h("button", { class: "btn small", type: "button", "data-user-off": u.username }, "許可を取り消す");
+          act(off, async () => { const { error } = await sb.rpc("admin_set_cloud_user", { p_username: u.username, p_on: false }); if (error) throw error; }, "許可を取り消しました");
+          return h("li", {}, "@" + u.username, " ", off);
+        }) : [h("li", { class: "muted" }, "まだいません。（管理者は、許可しなくても使えます）")])),
+        userGrant,
         h("h3", {}, `Cloudの利用の申請（${ov.requests.length}）`), h("ul", { class: "cloud-list" }, ...reqs),
         h("h3", {}, `Cloudを許可しているHTML（${ov.posts.length}）`), h("ul", { class: "cloud-list" }, ...posts));
     }
@@ -3928,13 +3995,9 @@ await Cloud.remove();                        // 自分の記録を消す`));
     }
 
     // タブ（プレビュー / HTML / CSS / JS）
-    // プレビューに、投稿のコードより前に入れるもの：未ログインなら通信の禁止、Cloud が許可されていれば Cloud コネクタ
-    // （ダウンロードするHTML・ZIPには入らない。ダウンロードは、投稿に書かれたコードそのまま）
-    let connectorJs = null;
-    if (cloudInfo && cloudInfo.enabled) {
-      try { const r = await sb.rpc("cloud_connector_for_post", { p_post: id }); if (!r.error && typeof r.data === "string" && r.data) connectorJs = r.data; } catch (e) { /* コネクタなしで表示 */ }
-    }
-    const injected = (session ? "" : NET_GUARD) + (connectorJs ? "<script>" + connectorJs.replace(/<\/script/gi, "<\\/script") + "</" + "script>" : "");
+    // プレビューに、投稿のコードより前に入れるもの：未ログインなら通信の禁止だけ。
+    // Cloud コネクタは、自動では入れない（許可されたユーザーが、自分のHTMLの <script> の中に貼って使う）
+    const injected = session ? "" : NET_GUARD;
     const baseDoc = previewDoc(post, assets);
     const previewEl = previewWithFullscreen(injected ? injectAtTop(baseDoc, injected) : baseDoc);
     if (!session) attachNetGuard(previewEl.querySelector("iframe"), token);   // 未ログインでは、通信しようとしたら警告を出す
