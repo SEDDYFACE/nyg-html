@@ -461,3 +461,7 @@ details.targets > summary.none { color: #8a5a00; }
 .view-adjust-mod { margin: .8rem 0 1.2rem; padding-bottom: 1rem; border-bottom: 1px solid var(--line); }
 .view-adjust-mod h4, .view-adjust-log h4 { margin: .2rem 0 .6rem; }
 .admin-warning { margin: 0 0 1rem; padding: .8rem 1rem; border: 1px solid #e0a4a4; border-left: 5px solid #c0392b; border-radius: 8px; background: #fdecec; color: #7a1f1f; font-weight: 600; line-height: 1.5; }
+
+/* ---- 複数のJavaScriptファイル：並べ替え ---- */
+.file-list .file-move { display: inline-flex; gap: .3rem; margin-left: .5rem; vertical-align: middle; }
+.file-list .file-move .btn.small { padding: .1rem .5rem; }
