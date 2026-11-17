@@ -337,7 +337,6 @@ iframe.preview { width: 100%; height: 480px; border: 1px solid var(--line); bord
 .asset-card { border: 1px solid var(--line); border-radius: 8px; padding: .5rem; background: var(--card); text-align: center; }
 .asset-card img { max-width: 100%; max-height: 120px; object-fit: contain; }
 .asset-card audio { width: 100%; }
-.asset-json { padding: 1.4rem 0; font-weight: 600; color: var(--muted); }
 .asset-name { font-size: .82rem; font-weight: 600; overflow-wrap: anywhere; margin-top: .3rem; }
 
 /* 本名の入力・確認（2段階） */
@@ -447,21 +446,3 @@ details.targets > summary.none { color: #8a5a00; }
 .cloud-usage { margin-top: .6rem; }
 .cloud-usage summary { cursor: pointer; font-weight: 600; }
 .cloud-usage pre.codeview { white-space: pre-wrap; }
-
-/* ---- 管理者：アクセス数の調整 ---- */
-.view-adjust { margin-top: 1rem; border-left: 4px solid var(--danger, #c0392b); }
-.view-adjust summary { cursor: pointer; font-weight: 600; }
-.view-adjust .search-row, .view-adjust label.check, .view-adjust .actions { margin-top: .6rem; }
-.view-adjust select, .view-adjust input[type=number] {
-  width: 100%; padding: .55rem .7rem; border: 1px solid var(--line); border-radius: 8px; background: #fff; color: var(--text); font: inherit;
-}
-.view-adjust .search-row select, .view-adjust .search-row input { flex: 1 1 14rem; width: auto; }
-.view-adjust .search-row:last-of-type { margin-bottom: 0; }
-.view-adjust-log { margin-top: 1rem; }
-.view-adjust-mod { margin: .8rem 0 1.2rem; padding-bottom: 1rem; border-bottom: 1px solid var(--line); }
-.view-adjust-mod h4, .view-adjust-log h4 { margin: .2rem 0 .6rem; }
-.admin-warning { margin: 0 0 1rem; padding: .8rem 1rem; border: 1px solid #e0a4a4; border-left: 5px solid #c0392b; border-radius: 8px; background: #fdecec; color: #7a1f1f; font-weight: 600; line-height: 1.5; }
-
-/* ---- 複数のJavaScriptファイル：並べ替え ---- */
-.file-list .file-move { display: inline-flex; gap: .3rem; margin-left: .5rem; vertical-align: middle; }
-.file-list .file-move .btn.small { padding: .1rem .5rem; }
