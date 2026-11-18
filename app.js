@@ -44,6 +44,10 @@
     if (/reason required/i.test(m)) return "理由を入力してください。";
     if (/reason too long/i.test(m)) return "理由は200文字までです。";
     if (/delta too large|invalid value/i.test(m)) return "数が大きすぎます（または、正しくありません）。";
+    if (/too many attempts/i.test(m)) return "ユーザー名でのログインを、まちがえすぎました。15分ほど待つか、メールアドレスを入力してログインしてください。";
+    if (/you blocked this user/i.test(m)) return "ブロックしているユーザーには、メッセージを送れません。ブロックを解除してください。";
+    if (/cannot send/i.test(m)) return "このユーザーには、メッセージを送れません。";
+    if (/too many blocks/i.test(m)) return "ブロックできるのは、200人までです。";
     if (/Invalid login credentials/i.test(m)) return "ユーザー名またはパスワードが違います。";
     if (/Email not confirmed/i.test(m)) return "メールアドレスの確認が完了していません。届いたメールのリンクを開いてください。";
     if (/already been registered|already registered|email_exists|email address.*already/i.test(m)) return "そのメールアドレスは、すでに使われています。";
@@ -1063,7 +1067,7 @@
   }
 
   // 管理者に認証を要請する（未ログインでも使える）。本名の入力が必要
-  function verifyAskBox(username) {
+  function verifyAskBox(username, password) {
     const name = h("input", { type: "text", maxlength: 50, autocomplete: "off", placeholder: "例）山田 太郎", "aria-label": "本名" });
     const ask = h("button", { class: "btn primary", type: "button" }, "管理者に認証を要請する");
     const done = h("p", { class: "muted", hidden: true, style: "margin:.5rem 0 0" },
@@ -1073,7 +1077,7 @@
       await busy(ask, async () => {
         const nm = name.value.trim();
         if (!nm) { name.focus(); throw new Error("本名を入力してください。"); }
-        const { error } = await sb.rpc("request_email_verify", { p_username: username, p_name: nm });
+        const { error } = await sb.rpc("request_email_verify", { p_username: username, p_name: nm, p_password: password });
         if (error) throw error;
         ok = true;
         ask.textContent = "要請しました";
@@ -1091,26 +1095,33 @@
 
   function viewLogin() {
     if (session) { setTimeout(() => go("#/"), 0); return h("div"); }
-    const u = h("input", { type: "text", autocomplete: "username", required: true, maxlength: 20 });
+    const u = h("input", { type: "text", autocomplete: "username", required: true, maxlength: 254 });
     const p = h("input", { type: "password", autocomplete: "current-password", required: true });
     const btn = h("button", { class: "btn primary", type: "submit" }, "ログイン");
     const notConfirmed = h("div", {});
     const form = h("form", { class: "card narrow" },
       h("h1", {}, "ログイン"),
-      field("ユーザー名", u), field("パスワード", p), btn, notConfirmed,
+      field("ユーザー名（またはメールアドレス）", u), field("パスワード", p), btn, notConfirmed,
       h("p", { class: "hint-mail" }, "📧 新規登録のあとは、確認メールのリンクを開くまでログインできません。"),
       h("p", { class: "links" }, h("a", { href: "#/forgot" }, "パスワードを忘れた方"), " ・ ", h("a", { href: "#/signup" }, "新規登録")));
     form.addEventListener("submit", e => {
       e.preventDefault();
       busy(btn, async () => {
         notConfirmed.replaceChildren();
-        const { data: email, error: e1 } = await sb.rpc("email_for_username", { p_username: u.value.trim() });
-        if (e1) throw e1;
-        if (!email) throw new Error("Invalid login credentials");
+        // ユーザー名でログイン：パスワードが合っているときだけ、サーバーが、ログインに使うメールアドレスを返す。
+        // メールアドレスが入力されたときは、そのまま使う。
+        const typed = u.value.trim();
+        let email = typed;
+        if (!typed.includes("@")) {
+          const { data: em, error: e1 } = await sb.rpc("login_email", { p_username: typed, p_password: p.value });
+          if (e1) throw e1;
+          if (!em) throw new Error("Invalid login credentials");
+          email = em;
+        }
         const { error } = await sb.auth.signInWithPassword({ email, password: p.value });
         if (error && /Email not confirmed/i.test(error.message)) {
           // メール未認証：認証メールの再送／管理者への認証の要請
-          const username = u.value.trim();
+          const username = typed;
           const resend = h("button", { class: "btn", type: "button" }, "確認メールを再送する");
           resend.addEventListener("click", () => busy(resend, async () => {
             const { error: e4 } = await sb.auth.resend({ type: "signup", email, options: { emailRedirectTo: BASE_URL } });
@@ -1124,7 +1135,7 @@
             h("div", { class: "verify-alt" },
               h("strong", {}, "メールアドレスで認証できない方は以下："),
               h("p", { class: "muted", style: "margin:.3rem 0 .6rem" }, "メールが届かない・メールを受け取れない場合は、本名を入力して、管理者に認証を要請できます。"),
-              verifyAskBox(username))));
+              verifyAskBox(username, p.value))));
           return;
         }
         if (error) throw error;
@@ -1202,7 +1213,7 @@
             h("div", { class: "verify-alt" },
               h("strong", {}, "メールアドレスで認証できない方は以下："),
               h("p", { class: "muted", style: "margin:.3rem 0 .6rem" }, "メールが届かない・メールを受け取れない場合は、本名を入力して、管理者に認証を要請できます（管理者が確認したあと、ログインできるようになります）。"),
-              verifyAskBox(username)),
+              verifyAskBox(username, p1.value)),
             h("p", { class: "links" }, "リンクを開いたあとは ", h("a", { href: "#/login" }, "ログイン画面へ"))));
         }
       });
@@ -1800,6 +1811,7 @@
         if (error) {
           if (/too fast/i.test(error.message)) { showWarn("送信は3秒に1回までです"); return; }
           if (/too long/i.test(error.message)) { showWarn("一回の投稿で200文字までです"); return; }
+          if (/cannot send|you blocked this user/i.test(error.message)) { showWarn(friendly(error)); return; }
           throw error;
         }
         lastSent = Date.now();
@@ -1807,14 +1819,43 @@
         await load(); box.scrollTop = box.scrollHeight;
       });
     });
+    // ブロック・受信拒否（SQL 36 より前は、何も出さない）
+    const blockBtn = h("button", { class: "btn small dm-block-btn hidden", type: "button", title: "このユーザーをブロックする" }, "🚫 ブロック");
+    const unblockBtn = h("button", { class: "btn small", type: "button", "data-unblock": "1" }, "ブロックを解除する");
+    const blockedNote = h("div", { class: "notice dm-blocked hidden" }, "このユーザーをブロックしています。ブロックを解除すると、メッセージを送れます。", " ", unblockBtn);
+    const offNote = h("p", { class: "muted dm-off-note hidden" }, "「メッセージを受け取らない」設定がオンです（あなたからは送れます。アカウント設定で変えられます）。");
+    const applyBlock = on => { form.classList.toggle("hidden", on); blockedNote.classList.toggle("hidden", !on); blockBtn.classList.toggle("hidden", on); };
+    blockBtn.addEventListener("click", () => {
+      if (!window.confirm(`@${pf.username} をブロックしますか？\n\nお互いに、メッセージを送れなくなります（ブロックしたことは、相手には伝わりません）。いつでも解除できます。`)) return;
+      busy(blockBtn, async () => {
+        const { error } = await sb.rpc("block_user", { p_user: pf.id });
+        if (error) throw error;
+        applyBlock(true); toast("ブロックしました");
+        await refreshDmUnread(); renderNav();
+      });
+    });
+    unblockBtn.addEventListener("click", () => busy(unblockBtn, async () => {
+      const { error } = await sb.rpc("unblock_user", { p_user: pf.id });
+      if (error) throw error;
+      applyBlock(false); toast("ブロックを解除しました");
+    }));
+    (async () => {
+      try {
+        const { data, error } = await sb.rpc("dm_state", { p_with: pf.id });
+        if (error || !data) return;
+        if (token !== renderToken) return;
+        if (data.i_blocked) applyBlock(true); else blockBtn.classList.remove("hidden");
+        offNote.classList.toggle("hidden", !data.i_off);
+      } catch (e) { /* SQL未実行：何も出さない */ }
+    })();
     // 画面に表示されたあとで、いちばん下（最新のメッセージ）へ移す（表示前は高さが0で、移せない）
     const toBottom = () => { box.scrollTop = box.scrollHeight; };
     requestAnimationFrame(() => { toBottom(); setTimeout(toBottom, 150); });
     return h("div", { class: "dm-app" },
       h("div", { class: "dm-head" },
         h("a", { class: "dm-back", href: "#/messages", "aria-label": "メッセージ一覧へ戻る" }, "←"),
-        avatar(pf.username, "sm"), nameTag(pf.username, true)),
-      box, form,
+        avatar(pf.username, "sm"), nameTag(pf.username, true), blockBtn),
+      box, blockedNote, offNote, form,
       h("p", { class: "dm-foot muted" }, "メッセージは1週間で自動削除されます"));
   }
 
@@ -1893,7 +1934,46 @@
         go("#/");
       });
     });
-    return h("div", {}, form, cloudConnectorCard(), realNameCard(), emailCard(), passwordCard());
+    return h("div", {}, form, cloudConnectorCard(), dmSettingsCard(), realNameCard(), emailCard(), passwordCard());
+  }
+
+  // アカウント設定：メッセージ（DM）の設定（受け取らない設定・ブロックしている人の一覧）
+  function dmSettingsCard() {
+    const card = h("div", { class: "card form hidden", id: "dm-settings" });
+    (async () => {
+      let st;
+      try { const r = await sb.rpc("my_dm_settings"); if (r.error || !r.data) return; st = r.data; } catch (e) { return; }   // SQL未実行なら、出さない
+      const off = h("input", { type: "checkbox", id: "dm-off" });
+      off.checked = !!st.dm_off;
+      off.addEventListener("change", async () => {
+        off.disabled = true;
+        const { error } = await sb.rpc("set_dm_off", { p_off: off.checked });
+        off.disabled = false;
+        if (error) { off.checked = !off.checked; toast(friendly(error), true); return; }
+        toast(off.checked ? "メッセージを受け取らない設定にしました" : "メッセージを受け取る設定にしました");
+      });
+      const list = h("div", { class: "dm-block-list" });
+      const draw = () => {
+        list.replaceChildren(...((st.blocks || []).length ? st.blocks.map(b => {
+          const un = h("button", { class: "btn small", type: "button", "data-unblock-user": b.username }, "解除");
+          un.addEventListener("click", () => busy(un, async () => {
+            const { error } = await sb.rpc("unblock_user", { p_user: b.user_id });
+            if (error) throw error;
+            st.blocks = st.blocks.filter(x => x.user_id !== b.user_id); draw(); toast("ブロックを解除しました");
+          }));
+          return h("div", { class: "picker-row" }, h("span", {}, "@" + b.username), un);
+        }) : [h("p", { class: "muted" }, "ブロックしているユーザーはいません。")]));
+      };
+      draw();
+      card.append(h("h2", {}, "✉ メッセージ（DM）の設定"),
+        h("label", { class: "perm" }, off, " メッセージ（DM）を受け取らない"),
+        h("p", { class: "muted", style: "margin:.2rem 0 .8rem" }, "オンにすると、だれからもメッセージを受け取りません（あなたから送ることはできます）。"),
+        h("h3", {}, "ブロックしているユーザー"),
+        h("p", { class: "muted", style: "margin:.2rem 0" }, "ブロックすると、お互いにメッセージを送れなくなります。メッセージの画面の「🚫 ブロック」から、ブロックできます。"),
+        list);
+      card.classList.remove("hidden");
+    })();
+    return card;
   }
 
   // アカウント設定：Cloud コネクタ（許可されたユーザーと管理者にだけ出る）
@@ -2080,7 +2160,7 @@
     if (error) throw error;
     if (!data) return data;
     // 共同編集者（企画主・管理者のほかに、設定変更と投稿ができる人）
-    const { data: collabs } = await sb.from("project_collaborators").select("user_id,can_view_limited,can_edit_settings,can_post,user:profiles!user_id(username)").eq("project_id", id).order("created_at");
+    const { data: collabs } = await sb.from("project_collaborators").select("user_id,can_view_limited,can_edit_settings,can_post,can_cloud,user:profiles!user_id(username)").eq("project_id", id).order("created_at");
     data.collaborators = collabs || [];
     data.myCollab = session ? (data.collaborators.find(c => c.user_id === session.user.id) || null) : null;
     data.isCollab = !!data.myCollab;
@@ -2091,19 +2171,20 @@
   function collaboratorsBox(project, canManage) {
     const box = h("div", { class: "card" }, h("h2", {}, "👥 共同編集者"),
       h("p", { class: "muted", style: "margin-top:0" },
-        "共同編集者に何を許可するかは、人ごとに企画主が決められます（限定公開の投稿を見る／企画の設定（企画名・説明・投稿許可）を変更する／企画へ投稿する）。他の人の投稿の編集・削除や、企画の削除はできません。"));
+        "共同編集者に何を許可するかは、人ごとに企画主が決められます（限定公開の投稿を見る／企画の設定（企画名・説明・投稿許可）を変更する／企画へ投稿する／Cloudを管理する（記録の削除・向きの変更・利用の申請。はじめはオフです））。他の人の投稿の編集・削除や、企画の削除はできません。"));
     const list = h("div", {});
     function drawList() {
       list.replaceChildren();
       if (!project.collaborators.length) list.append(h("p", { class: "muted" }, "共同編集者はいません。"));
       project.collaborators.forEach(c => {
         const row = h("div", { class: "picker-row collab-row" }, h("span", { class: "collab-name" }, "@" + (c.user ? c.user.username : "?")));
-        const permDefs = [["can_view_limited", "限定公開を見る"], ["can_edit_settings", "企画の設定変更"], ["can_post", "投稿"]];
+        const permDefs = [["can_view_limited", "限定公開を見る"], ["can_edit_settings", "企画の設定変更"], ["can_post", "投稿"], ["can_cloud", "Cloudの管理"]];
+        const isOn = key => key === "can_cloud" ? c[key] === true : c[key] !== false;   // Cloudの管理は、企画主が、人ごとにオンにしたときだけ
         const perms = h("span", { class: "perms" });
         permDefs.forEach(([key, label]) => {
           if (canManage) {
             const cb = h("input", { type: "checkbox" });
-            cb.checked = c[key] !== false;
+            cb.checked = isOn(key);
             cb.addEventListener("change", async () => {
               cb.disabled = true;
               const { error } = await sb.from("project_collaborators").update({ [key]: cb.checked }).eq("project_id", project.id).eq("user_id", c.user_id);
@@ -2114,7 +2195,7 @@
             });
             perms.append(h("label", { class: "perm" }, cb, " " + label));
           } else {
-            perms.append(h("span", { class: "badge " + (c[key] !== false ? "open" : "") }, label + (c[key] !== false ? "：可" : "：不可")));
+            perms.append(h("span", { class: "badge " + (isOn(key) ? "open" : "") }, label + (isOn(key) ? "：可" : "：不可")));
           }
         });
         row.append(perms);
@@ -3459,6 +3540,7 @@
   function attachCloudHost(frame, postId, token) {
     if (cloudHostOff) cloudHostOff();
     let times = [];
+    let removeBlockedUntil = 0;   // 記録の削除がキャンセルされたとき、この時刻まで、削除の依頼を断る
     let rankingP = null;   // 待っている（読み込み中の）ランキング。続けて呼ばれたら、まとめて1回にする
     // 自分のオンライン自己ベストを、ブラウザにも覚えさせる（ユーザーと投稿ごと）
     const bestKey = () => (session ? `kh_best:${session.user.id}:${postId}` : null);
@@ -3524,7 +3606,15 @@
           out = session ? await call("cloud_submit", { p_post: postId, p_score: sc }) : { saved: false, best: null, reason: "login" };
           if (session && out && out.best != null) bestSet(out.best);   // 記録できたときも、記録できなかったとき（いまのベスト）も、覚える
         }
-        else if (d.op === "remove") { await call("cloud_remove", { p_post: postId }); bestSet(undefined); out = true; }
+        else if (d.op === "remove") {
+          // 投稿のプログラムが、利用者の記録を、無断で消せないように、必ず、利用者に確認する（キャンセルされたら、30秒は、確認も出さずに断る）
+          if (Date.now() < removeBlockedUntil) throw new Error("記録の削除は、キャンセルされました。しばらくしてから、もう一度お試しください。");
+          if (!window.confirm("このページのプログラムが、あなたの記録（この投稿のオンライン記録）を削除しようとしています。\n\n削除しますか？")) {
+            removeBlockedUntil = Date.now() + 30000;
+            throw new Error("記録の削除は、キャンセルされました。");
+          }
+          await call("cloud_remove", { p_post: postId }); bestSet(undefined); out = true;
+        }
         else throw new Error("unknown op");
         reply(ev.source, id, true, out);
       } catch (e) { reply(ev.source, id, false, null, friendly(e)); }
