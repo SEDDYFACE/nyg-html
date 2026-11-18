@@ -320,12 +320,18 @@ iframe.preview { width: 100%; height: 480px; border: 1px solid var(--line); bord
 .dm-edit { width: 100%; box-sizing: border-box; border: 1px solid var(--line); border-radius: 12px; padding: .5rem .7rem; font: inherit; resize: vertical; }
 .dm-edit-actions { display: flex; gap: .4rem; justify-content: flex-end; margin-top: .3rem; }
 
-/* プレビューの全画面表示 */
-.preview-wrap { position: relative; background: #fff; }
-.preview-fs { position: absolute; top: .5rem; right: .5rem; z-index: 2; opacity: .92; box-shadow: 0 1px 4px rgba(0,0,0,.25); }
-.preview-wrap:fullscreen { width: 100vw; height: 100vh; background: #fff; }
-.preview-wrap:fullscreen iframe.preview, .preview-wrap.fs-fixed iframe.preview { width: 100%; height: 100vh; border: 0; border-radius: 0; }
-.preview-wrap.fs-fixed { position: fixed; inset: 0; z-index: 3000; width: 100vw; height: 100vh; }
+/* プレビューの全画面表示・別タブで開く（ボタンは、枠の外の、下） */
+.preview-wrap { position: relative; background: #fff; display: flex; flex-direction: column; }
+.preview-bar { display: flex; gap: .5rem; justify-content: flex-end; align-items: center; padding: .45rem 0 0; }
+.preview-wrap:fullscreen, .preview-wrap.fs-fixed { width: 100vw; height: 100vh; background: var(--bg, #fff); }
+.preview-wrap:fullscreen iframe.preview, .preview-wrap.fs-fixed iframe.preview { flex: 1 1 auto; min-height: 0; width: 100%; height: auto; border: 0; border-radius: 0; }
+.preview-wrap:fullscreen .preview-bar, .preview-wrap.fs-fixed .preview-bar { padding: .4rem .6rem; border-top: 1px solid var(--line); background: var(--surface, #fff); }
+.preview-wrap.fs-fixed { position: fixed; inset: 0; z-index: 3000; }
+/* 別タブ用の表示：プレビューだけを、画面いっぱいに出す */
+body.play-mode .topbar, body.play-mode footer { display: none; }
+body.play-mode main, body.play-mode #app { max-width: none; margin: 0; padding: 0; }
+body.play-mode .preview-wrap.play { height: 100vh; }
+body.play-mode .preview-wrap.play iframe.preview { flex: 1 1 auto; height: 100vh; border: 0; border-radius: 0; }
 
 /* 添付ファイル（画像・音声） */
 .assets-box { margin: 1rem 0; padding: .8rem 1rem; border: 1px dashed var(--line); border-radius: var(--radius); }
