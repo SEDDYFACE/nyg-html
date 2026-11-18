@@ -465,3 +465,9 @@ details.targets > summary.none { color: #8a5a00; }
 /* ---- 複数のJavaScriptファイル：並べ替え ---- */
 .file-list .file-move { display: inline-flex; gap: .3rem; margin-left: .5rem; vertical-align: middle; }
 .file-list .file-move .btn.small { padding: .1rem .5rem; }
+
+/* メッセージ：ブロック・受信拒否 */
+.dm-head .dm-block-btn { margin-left: auto; }
+.dm-blocked { margin: .6rem 1rem; }
+.dm-off-note { margin: .3rem 1rem; font-size: .85rem; }
+.dm-block-list .picker-row { display: flex; align-items: center; justify-content: space-between; gap: .6rem; }
