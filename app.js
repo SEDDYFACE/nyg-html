@@ -860,8 +860,9 @@
   }
   const previewDoc = (p, assets) => inlineAssets(compose(p, false), assets);
 
-  // プレビューの全画面表示（全画面 API が使えない端末では、画面いっぱいの重ね表示にする）
-  function previewWithFullscreen(doc) {
+  // プレビューの全画面表示（全画面 API が使えない端末では、画面いっぱいの重ね表示にする）。
+  // ボタン（「全画面」「別タブで開く」）は、枠の外の、下に置く。playUrl があれば、「別タブで開く」を出す。
+  function previewWithFullscreen(doc, playUrl) {
     const wrap = h("div", { class: "preview-wrap", tabindex: "-1" });
     const frame = previewFrame(doc);
     const btn = h("button", { class: "btn small preview-fs", type: "button", title: "プレビューを全画面で表示" }, "⛶ 全画面");
@@ -878,7 +879,8 @@
     btn.addEventListener("click", () => (isFs() ? leave() : enter()));
     document.addEventListener("fullscreenchange", sync);
     wrap.addEventListener("keydown", e => { if (e.key === "Escape") leave(); });
-    wrap.append(btn, frame);
+    const newTab = playUrl ? h("a", { class: "btn small preview-newtab", href: playUrl, target: "_blank", rel: "noopener", title: "プレビューだけを、新しいタブで開く" }, "↗ 別タブで開く") : null;
+    wrap.append(frame, h("div", { class: "preview-bar" }, btn, newTab));
     return wrap;
   }
 
@@ -971,6 +973,7 @@
    * ==================================================== */
   async function route() {
     const token = ++renderToken;
+    document.body.classList.remove("play-mode");   // 別タブ用の表示（プレビューだけ）を解く
     clearInterval(dmTimer);
     if (cloudHostOff) cloudHostOff();   // 前のページのプレビューと Cloud をつなぐ窓口を閉じる
     if (netGuardOff) netGuardOff();
@@ -1000,6 +1003,7 @@
       else if (a === "project" && b && c === "new") view = await viewPostNew(b);
       else if (a === "project" && b) view = await viewProject(b);
       else if (a === "post" && b && c === "edit") view = await viewPostEdit(b);
+      else if (a === "post" && b && c === "play") view = await viewPost(b, token, { play: true });
       else if (a === "post" && b) view = await viewPost(b, token);
       else view = h("div", { class: "card" }, h("h2", {}, "ページが見つかりません"), h("a", { href: "#/" }, "トップへ戻る"));
       if (token !== renderToken) return;
@@ -3985,7 +3989,7 @@
     return box;
   }
 
-  async function viewPost(id, token) {
+  async function viewPost(id, token, opts = {}) {
     if (token !== undefined && !(await waitBeforeOpen(token))) return h("div", {});   // 待っている間に別のページへ移った（描画されない）
     const post = await fetchPost(id);
     if (!post) return notFound();
@@ -4089,7 +4093,11 @@
     // Cloud コネクタは、自動では入れない（許可されたユーザーが、自分のHTMLの <script> の中に貼って使う）
     const injected = session ? "" : NET_GUARD;
     const baseDoc = previewDoc(post, assets);
-    const previewEl = previewWithFullscreen(injected ? injectAtTop(baseDoc, injected) : baseDoc);
+    const fullDoc = injected ? injectAtTop(baseDoc, injected) : baseDoc;
+    // 別タブ用（「#/post/ID/play」）：プレビューだけを、画面いっぱいに出す（ボタンは、出さない）
+    const previewEl = opts.play
+      ? h("div", { class: "preview-wrap play" }, previewFrame(fullDoc))
+      : previewWithFullscreen(fullDoc, new URL(`#/post/${id}/play`, location.href).href);
     if (!session) attachNetGuard(previewEl.querySelector("iframe"), token);   // 未ログインでは、通信しようとしたら警告を出す
     if (cloudInfo) attachCloudHost(previewEl.querySelector("iframe"), id, token);   // Cloud コネクタからの呼び出しを受ける（許可されていなければ、サーバーが断る）
     const panels = {
@@ -4115,6 +4123,10 @@
     const codeNote = codeOk ? null : h("p", { class: "muted code-note" },
       !session && dlByPolicy ? "🔒 コードの閲覧とダウンロードは、ログインした人だけができます。" : "🔒 投稿者がダウンロードを許可していないため、コードは表示されません（プレビューだけ見られます）。");
 
+    if (opts.play) {
+      if (token === renderToken) { document.body.classList.add("play-mode"); document.title = post.title + " - コードひろば"; }
+      return h("section", { class: "play" }, previewEl);
+    }
     return h("section", {},
       h("p", {}, h("a", { href: `#/project/${post.project.id}` }, "← " + post.project.title)),
       h("div", { class: "card" },
