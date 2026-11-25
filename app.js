@@ -5,7 +5,9 @@
   const app = document.getElementById("app");
   const navEl = document.getElementById("nav");
   const toastEl = document.getElementById("toast");
-  const bellEl = document.getElementById("bell");
+  const bellEl = document.getElementById("bell") || (() => {
+    const el = document.createElement("span"); el.id = "bell"; (navEl && navEl.parentNode ? navEl.parentNode : document.body).append(el); return el;
+  })();
 
   /* ======================================================
    * 小さなユーティリティ
@@ -203,7 +205,9 @@
     } catch (e) { dmUnread = 0; }
   }
   let dmTimer = null;
-  const bannerEl = document.getElementById("banner");
+  const bannerEl = document.getElementById("banner") || (() => {   // index.html が古くて、欄がなくても動くようにする
+    const el = document.createElement("div"); el.id = "banner"; app.parentNode.insertBefore(el, app); return el;
+  })();
   let nagged = false, naggedName = false;
   // 本名の入力欄（本人用）。送信すると 1段階目（本人による入力）が完了し、管理者の確認待ちになる
   const nameDaysLeft = () => acct ? Math.max(0, Math.ceil((acct.name_seconds_left || 0) / 86400)) : 0;
@@ -3573,7 +3577,7 @@
     }
   }
   function storeShim(snap, persist, token) {
-    const json = JSON.stringify(snap || {}).replace(/</g, "\\u003c").replace(/ /g, "\\u2028").replace(/ /g, "\\u2029");
+    const json = JSON.stringify(snap || {}).replace(/</g, "\\u003c").split(String.fromCharCode(0x2028)).join("\\u2028").split(String.fromCharCode(0x2029)).join("\\u2029");
     return "<script>(" + storeShimMain.toString() + ")(" + json + "," + (persist ? "true" : "false") + "," + JSON.stringify(token) + "," + SAVE_MAX_CHARS + ");</" + "script>";
   }
   // 親から受け取った（または保存してあった）内容が、決められた形・大きさかを確かめる。だめなら null
