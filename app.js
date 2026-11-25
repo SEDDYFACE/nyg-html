@@ -977,6 +977,7 @@
     clearInterval(dmTimer);
     if (cloudHostOff) cloudHostOff();   // 前のページのプレビューと Cloud をつなぐ窓口を閉じる
     if (netGuardOff) netGuardOff();
+    if (saveHostOff) saveHostOff();   // ゲームのセーブの窓口（直前の保存だけは、少しの間、受け付ける）
     await loadAdminNames();
     { const before = dmUnread; await refreshDmUnread(); if (before !== dmUnread) renderNav(); }
     loadNotifs();   // ベルの更新（待たない）
@@ -3269,7 +3270,8 @@
     prevBtn.addEventListener("click", () => busy(prevBtn, async () => {
       const as = await assetsUI.previewAssets();
       previewBox.classList.remove("hidden");
-      previewBox.replaceChildren(previewFrame(previewDoc({ title: title.value, html: html.value, css: css.value, js: js.value }, as)));
+      // 投稿前の確認用：localStorage は使えるが、保存はしない（投稿前のデータで、本番のセーブを汚さないため）
+      previewBox.replaceChildren(previewFrame(injectAtTop(previewDoc({ title: title.value, html: html.value, css: css.value, js: js.value }, as), storeShim({}, false, newToken()))));
     }));
 
     /* ---- 入力方法の切り替え（コード入力 / ファイル添付） ---- */
@@ -3493,6 +3495,136 @@
     "['RTCPeerConnection','webkitRTCPeerConnection','RTCDataChannel'].forEach(function(n){if(!(n in window))return;" +
     "var f=function(){w(n);throw new Error('ログインしていないため、インターネット通信はできません');};" +
     "try{Object.defineProperty(window,n,{value:f,writable:false,configurable:false});}catch(e){}});})();</" + "script>";
+  /* ------------------------------------------------------
+   * ゲームのセーブ（続きから遊ぶ）
+   *   プレビューは、安全のため、サイトとは別の「出どころ」で動く。そのため、投稿コードは localStorage を使えない。
+   *   そこで、投稿コードより先に「localStorage の代わり」を入れ、書き込まれた内容を、親ページ（このサイト）が
+   *   「この端末のブラウザ」の中に、投稿ごとに保存する。アカウントには結び付けない。
+   *   ・保存先は、このブラウザの localStorage（"ch_save:投稿ID"）。サーバーには、送らない
+   *   ・sessionStorage は、そのページを開いている間だけ（保存しない）
+   * ---------------------------------------------------- */
+  const SAVE_PREFIX = "ch_save:";
+  const SAVE_MAX_CHARS = 1000000;   // 1つの投稿が保存できる量（キー＋値の文字数の合計）
+  const SAVE_MAX_KEYS = 500;
+  // ↓ この関数は、プレビューの中（投稿コードの直前）で動く。文字列にして埋め込むので、外の変数は使わない
+  function storeShimMain(snap, persist, token, cap) {
+    var NAME_MARK = "\u0001ch:" + token + ":";
+    function makeStore(init, onChange) {
+      var data = Object.create(null), total = 0;
+      function add(k, v) { data[k] = v; total += k.length + v.length; }
+      Object.keys(init || {}).forEach(function (k) { add(k, String(init[k])); });
+      var api = {
+        getItem: function (k) { k = String(k); return k in data ? data[k] : null; },
+        setItem: function (k, v) {
+          if (arguments.length < 2) throw new TypeError("Failed to execute 'setItem' on 'Storage': 2 arguments required, but only " + arguments.length + " present.");
+          k = String(k); v = String(v);
+          var old = k in data ? k.length + data[k].length : 0;
+          if (total - old + k.length + v.length > cap) throw new DOMException("Failed to execute 'setItem' on 'Storage': Setting the value of '" + k + "' exceeded the quota.", "QuotaExceededError");
+          total += k.length + v.length - old; data[k] = v; onChange();
+        },
+        removeItem: function (k) { k = String(k); if (k in data) { total -= k.length + data[k].length; delete data[k]; onChange(); } },
+        clear: function () { if (Object.keys(data).length) { data = Object.create(null); total = 0; onChange(); } },
+        key: function (i) { var ks = Object.keys(data); i = Number(i); return i >= 0 && i < ks.length ? ks[i] : null; }
+      };
+      var target = {};
+      return {
+        proxy: new Proxy(target, {
+          get: function (t, p) {
+            if (p === "length") return Object.keys(data).length;
+            if (p === Symbol.toStringTag) return "Storage";
+            if (typeof p === "string") {
+              if (Object.prototype.hasOwnProperty.call(api, p)) return api[p];
+              return p in data ? data[p] : undefined;
+            }
+            return undefined;
+          },
+          set: function (t, p, v) { if (typeof p === "string") api.setItem(p, v); return true; },
+          deleteProperty: function (t, p) { if (typeof p === "string") api.removeItem(p); return true; },
+          has: function (t, p) { return typeof p === "string" && (p === "length" || p in data || Object.prototype.hasOwnProperty.call(api, p)); },
+          ownKeys: function () { return Object.keys(data); },
+          getOwnPropertyDescriptor: function (t, p) {
+            return typeof p === "string" && p in data ? { value: data[p], writable: true, enumerable: true, configurable: true } : undefined;
+          }
+        }),
+        dump: function () { var o = {}; Object.keys(data).forEach(function (k) { o[k] = data[k]; }); return o; }
+      };
+    }
+    var timer = 0;
+    function flush() {
+      if (!persist) return;
+      timer = 0;
+      var d = local.dump();
+      try { window.name = NAME_MARK + JSON.stringify(d); } catch (e) {}
+      try { parent.postMessage({ kh: "save", t: token, data: d }, "*"); } catch (e) {}
+    }
+    function changed() { if (persist && !timer) timer = setTimeout(flush, 400); }
+    // iframe の中でページが再読み込みされたときは、親が持っている古い内容ではなく、直前の内容から始める
+    var start = snap;
+    if (persist && typeof window.name === "string" && window.name.indexOf(NAME_MARK) === 0) {
+      try { start = JSON.parse(window.name.slice(NAME_MARK.length)); } catch (e) {}
+    }
+    var local = makeStore(start, changed), session = makeStore(null, function () {});
+    try { Object.defineProperty(window, "localStorage", { get: function () { return local.proxy; }, configurable: true }); } catch (e) {}
+    try { Object.defineProperty(window, "sessionStorage", { get: function () { return session.proxy; }, configurable: true }); } catch (e) {}
+    if (persist) {
+      window.addEventListener("pagehide", flush);
+      window.addEventListener("beforeunload", flush);
+      document.addEventListener("visibilitychange", function () { if (document.visibilityState === "hidden") flush(); });
+    }
+  }
+  function storeShim(snap, persist, token) {
+    const json = JSON.stringify(snap || {}).replace(/</g, "\\u003c").replace(/ /g, "\\u2028").replace(/ /g, "\\u2029");
+    return "<script>(" + storeShimMain.toString() + ")(" + json + "," + (persist ? "true" : "false") + "," + JSON.stringify(token) + "," + SAVE_MAX_CHARS + ");</" + "script>";
+  }
+  // 親から受け取った（または保存してあった）内容が、決められた形・大きさかを確かめる。だめなら null
+  function cleanSave(o) {
+    if (!o || typeof o !== "object" || Array.isArray(o)) return null;
+    const out = {};
+    let total = 0, n = 0;
+    for (const k of Object.keys(o)) {
+      const v = o[k];
+      if (typeof v !== "string") return null;
+      total += k.length + v.length;
+      if (++n > SAVE_MAX_KEYS || total > SAVE_MAX_CHARS) return null;
+      out[k] = v;
+    }
+    return out;
+  }
+  function readSave(postId) {
+    try { return cleanSave(JSON.parse(localStorage.getItem(SAVE_PREFIX + postId) || "null")) || {}; } catch (e) { return {}; }
+  }
+  const newToken = () => Array.from(crypto.getRandomValues(new Uint8Array(12)), b => b.toString(16).padStart(2, "0")).join("");
+  // プレビューの中のゲームから「保存して」と来たら、この端末のブラウザ（localStorage）に、投稿ごとに保存する
+  let saveHostOff = null;
+  function attachSaveHost(postId, token, onChange) {
+    if (saveHostOff) saveHostOff();
+    const key = SAVE_PREFIX + postId;
+    let dead = false;
+    const onMsg = ev => {
+      const d = ev.data;
+      if (dead || !d || d.kh !== "save" || d.t !== token) return;
+      const clean = cleanSave(d.data);
+      if (!clean) return;
+      try {
+        if (Object.keys(clean).length) localStorage.setItem(key, JSON.stringify(clean));
+        else localStorage.removeItem(key);
+      } catch (e) { /* 保存できないときは、あきらめる（遊ぶことには影響しない） */ }
+      if (onChange) onChange();
+    };
+    window.addEventListener("message", onMsg);
+    let retire = null;
+    const off = () => {
+      // ページを離れる直前の保存が、少し遅れて届くことがあるので、しばらくは受け付ける
+      if (retire) return;
+      retire = setTimeout(() => window.removeEventListener("message", onMsg), 3000);
+      if (saveHostOff === off) saveHostOff = null;
+    };
+    saveHostOff = off;
+    return {
+      has: () => { try { return localStorage.getItem(key) !== null; } catch (e) { return false; } },
+      clear: () => { dead = true; try { localStorage.removeItem(key); } catch (e) {} }
+    };
+  }
   function injectAtTop(doc, html) {
     // 必ず、文書の先頭（<!DOCTYPE> の直後）に入れる。投稿コードより前に読み込まれるようにするため
     const m = doc.match(/^\s*<!doctype[^>]*>/i);
@@ -4091,13 +4223,27 @@
     // タブ（プレビュー / HTML / CSS / JS）
     // プレビューに、投稿のコードより前に入れるもの：未ログインなら通信の禁止だけ。
     // Cloud コネクタは、自動では入れない（許可されたユーザーが、自分のHTMLの <script> の中に貼って使う）
-    const injected = session ? "" : NET_GUARD;
+    // ゲームのセーブ用の localStorage の代わり（この端末のブラウザに、投稿ごとに保存。アカウントとは結び付けない）も入れる
+    const saveToken = newToken();
+    const injected = (session ? "" : NET_GUARD) + storeShim(readSave(id), true, saveToken);
     const baseDoc = previewDoc(post, assets);
-    const fullDoc = injected ? injectAtTop(baseDoc, injected) : baseDoc;
+    const fullDoc = injectAtTop(baseDoc, injected);
     // 別タブ用（「#/post/ID/play」）：プレビューだけを、画面いっぱいに出す（ボタンは、出さない）
     const previewEl = opts.play
       ? h("div", { class: "preview-wrap play" }, previewFrame(fullDoc))
       : previewWithFullscreen(fullDoc, new URL(`#/post/${id}/play`, location.href).href);
+    // 「セーブデータを消す」ボタン（この端末に保存があるときだけ出す）
+    const saveBtn = h("button", { class: "btn small preview-clearsave hidden", type: "button", title: "この端末に保存された、このゲームの続きのデータを消す" }, "🗑 セーブデータを消す");
+    const saveHost = attachSaveHost(id, saveToken, () => saveBtn.classList.toggle("hidden", !saveHost.has()));
+    saveBtn.classList.toggle("hidden", !saveHost.has());
+    saveBtn.addEventListener("click", () => {
+      if (!confirm("この端末に保存された、このゲームのセーブデータ（続きのデータ）を消します。よろしいですか？\n（ほかの端末や、ほかの人のデータには影響しません）")) return;
+      saveHost.clear();
+      toast("セーブデータを消しました");
+      route();   // 最初の状態から、始め直す
+    });
+    const bar = previewEl.querySelector(".preview-bar");
+    if (bar) bar.append(saveBtn);
     if (!session) attachNetGuard(previewEl.querySelector("iframe"), token);   // 未ログインでは、通信しようとしたら警告を出す
     if (cloudInfo) attachCloudHost(previewEl.querySelector("iframe"), id, token);   // Cloud コネクタからの呼び出しを受ける（許可されていなければ、サーバーが断る）
     const panels = {
