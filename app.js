@@ -723,7 +723,7 @@
     return h("iframe", {
       class: "preview",
       title: "プレビュー",
-      sandbox: "allow-scripts allow-forms allow-modals",
+      sandbox: "allow-scripts allow-forms allow-modals allow-pointer-lock",
       referrerpolicy: "no-referrer",
       srcdoc: doc
     });
